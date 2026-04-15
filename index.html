@@ -20,6 +20,67 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<script>
+const AudioCtx = window.AudioContext || window.webkitAudioContext;
+let _ctx = null;
+const getCtx = () => { if (!_ctx) _ctx = new AudioCtx(); return _ctx; };
+
+const playSound = (type) => {
+  try {
+    const ctx = getCtx();
+    const g = ctx.createGain();
+    g.connect(ctx.destination);
+    const o = ctx.createOscillator();
+    o.connect(g);
+
+    if (type === "num") {
+      // Мягкий средний блип
+      o.type = "sine";
+      o.frequency.setValueAtTime(440, ctx.currentTime);
+      o.frequency.exponentialRampToValueAtTime(330, ctx.currentTime + 0.07);
+      g.gain.setValueAtTime(0.15, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.09);
+      o.start(ctx.currentTime);
+      o.stop(ctx.currentTime + 0.09);
+    } else if (type === "del") {
+      // Lower dull thud
+      o.type = "sine";
+      o.frequency.setValueAtTime(320, ctx.currentTime);
+      o.frequency.exponentialRampToValueAtTime(180, ctx.currentTime + 0.1);
+      g.gain.setValueAtTime(0.22, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.12);
+      o.start(ctx.currentTime);
+      o.stop(ctx.currentTime + 0.12);
+    } else if (type === "eq") {
+      // Двойной восходящий перезвон — правильный ответ
+      [0, 0.1].forEach((delay, i) => {
+        const o2 = ctx.createOscillator();
+        const g2 = ctx.createGain();
+        o2.connect(g2); g2.connect(ctx.destination);
+        o2.type = "triangle";
+        o2.frequency.setValueAtTime(i === 0 ? 660 : 880, ctx.currentTime + delay);
+        g2.gain.setValueAtTime(0.20, ctx.currentTime + delay);
+        g2.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + delay + 0.15);
+        o2.start(ctx.currentTime + delay);
+        o2.stop(ctx.currentTime + delay + 0.15);
+      });
+      return;
+    } else if (type === "wrong") {
+      // Нисходящий грустный звук — неправильный ответ
+      o.type = "sawtooth";
+      o.frequency.setValueAtTime(300, ctx.currentTime);
+      o.frequency.exponentialRampToValueAtTime(120, ctx.currentTime + 0.35);
+      g.gain.setValueAtTime(0.18, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.38);
+      o.start(ctx.currentTime);
+      o.stop(ctx.currentTime + 0.38);
+      return;
+    }
+  } catch(e) {}
+};
+
+window.playSound = playSound;
+</script>
 <script type="text/babel">
 const { useState, useEffect, useRef } = React;
 
@@ -73,8 +134,13 @@ function App() {
 
   pf.current = d => {
     if (R.current.ph !== "q") return;
-    if (d === "del") { setAns(a => a.slice(0,-1)); return; }
+    if (d === "del") {
+      window.playSound("del");
+      setAns(a => a.slice(0,-1));
+      return;
+    }
     if (R.current.ans.length >= 3) return;
+    window.playSound("num");
     setAns(a => a + d);
   };
 
@@ -82,7 +148,7 @@ function App() {
     const {ph, ans, fact, sCor, sTot, tbs, data} = R.current;
     if (ph !== "q" || !ans || !fact) return;
     const ok = parseInt(ans) === fact.a * fact.b;
-    const nf = {...data.facts};
+    window.playSound(ok ? "eq" : "wrong");    const nf = {...data.facts};
     const o = nf[fact.k] || {c:0, w:0};
     nf[fact.k] = {c: o.c+(ok?1:0), w: o.w+(ok?0:1), t: Date.now()};
     const nT = sTot+1, nC = sCor+(ok?1:0);
