@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<meta name="apple-mobile-web-app-title" content="Умножение" />
+<title>Таблица умножения</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { background: #F5F3FF; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+  button:active { opacity: 0.75; transform: scale(0.97); }
+  input { -webkit-appearance: none; appearance: none; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+const KEY = "mt_v3", PPIN = "1234", SES = 20;
+const NUMS = [2,3,4,5,6,7,8,9,10];
+const PU = "#534AB7", PL = "#EEEDFE", GR = "#16A34A", RD = "#DC2626";
+
+const ld = () => { try { return JSON.parse(localStorage.getItem(KEY)) || {facts:{},sessions:[]} } catch(e) { return {facts:{},sessions:[]} }};
+const sv = d => { try { localStorage.setItem(KEY, JSON.stringify(d)) } catch(e) {}};
+const wt = f => !f || f.c+f.w===0 ? 0.65 : Math.max(0.1, 1 - f.c/(f.c+f.w+0.5));
+
+const pick = (tbs, facts) => {
+  const pool = tbs.flatMap(a => NUMS.map(b => ({a, b, k:`${a}x${b}`})));
+  const ws = pool.map(p => wt(facts[p.k]));
+  const sum = ws.reduce((s,w) => s+w, 0);
+  let r = Math.random() * sum;
+  for (let i=0; i<pool.length; i++) { r -= ws[i]; if (r<=0) return pool[i]; }
+  return pool[pool.length-1];
+};
+
+const hc = f => {
+  if (!f || f.c+f.w===0) return {bg:"#E5E7EB", tx:"#9CA3AF"};
+  const a = f.c/(f.c+f.w);
+  if (a >= 0.85) return {bg:"#4ADE80", tx:"#166534"};
+  if (a >= 0.65) return {bg:"#86EFAC", tx:"#14532D"};
+  if (a >= 0.40) return {bg:"#FCA5A5", tx:"#7F1D1D"};
+  return {bg:"#F87171", tx:"#7F1D1D"};
+};
+
+const fmtD = ts => new Date(ts).toLocaleDateString("ru-RU", {day:"numeric", month:"short", hour:"2-digit", minute:"2-digit"});
+const fmtS = s => s < 60 ? `${s}с` : `${Math.floor(s/60)}м ${s%60}с`;
+
+function App() {
+  const [sc, setSc] = useState("home");
+  const [data, setData] = useState(ld);
+  const [nm, setNm] = useState(() => ld().name || "");
+  const [tbs, setTbs] = useState([2,3,4,5]);
+  const [fact, setFact] = useState(null);
+  const [ans, setAns] = useState("");
+  const [ph, setPh] = useState("q");
+  const [sCor, setSCor] = useState(0);
+  const [sTot, setSTot] = useState(0);
+  const t0 = useRef(null);
+  const [pinI, setPinI] = useState("");
+  const [pinE, setPinE] = useState(false);
+
+  const ud = d => { setData(d); sv(d); };
+  const R = useRef({});
+  R.current = {ph, ans, fact, sCor, sTot, tbs, data};
+  const sf = useRef(null), pf = useRef(null);
+
+  pf.current = d => {
+    if (R.current.ph !== "q") return;
+    if (d === "del") { setAns(a => a.slice(0,-1)); return; }
+    if (R.current.ans.length >= 3) return;
+    setAns(a => a + d);
+  };
+
+  sf.current = () => {
+    const {ph, ans, fact, sCor, sTot, tbs, data} = R.current;
+    if (ph !== "q" || !ans || !fact) return;
+    const ok = parseInt(ans) === fact.a * fact.b;
+    const nf = {...data.facts};
+    const o = nf[fact.k] || {c:0, w:0};
+    nf[fact.k] = {c: o.c+(ok?1:0), w: o.w+(ok?0:1), t: Date.now()};
+    const nT = sTot+1, nC = sCor+(ok?1:0);
+    setSTot(nT); setSCor(nC); setPh(ok ? "ok" : "err");
+    const nd = {...data, facts: nf};
+    ud(nd);
+    setTimeout(() => {
+      if (nT >= SES) {
+        const s = {date: Date.now(), dur: Math.round((Date.now()-t0.current)/1000), correct: nC, total: nT, tables: [...tbs]};
+        ud({...nd, sessions: [s, ...(nd.sessions||[])].slice(0,30)});
+        setSc("results");
+      } else {
+        setFact(pick(tbs, nf)); setAns(""); setPh("q");
+      }
+    }, ok ? 900 : 1800);
+  };
+
+  useEffect(() => {
+    if (sc !== "train") return;
+    const h = e => {
+      if (e.key >= "0" && e.key <= "9") pf.current(e.key);
+      else if (e.key === "Backspace") pf.current("del");
+      else if (e.key === "Enter") sf.current();
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [sc]);
+
+  const startTrain = () => {
+    if (!tbs.length) return;
+    const d = {...data, name: nm.trim() || "Ученик"};
+    ud(d); t0.current = Date.now();
+    setSCor(0); setSTot(0);
+    setFact(pick(tbs, d.facts));
+    setAns(""); setPh("q"); setSc("train");
+  };
+
+  const W = {width:"100%", maxWidth:420, boxSizing:"border-box"};
+  const base = {minHeight:"100vh", background:"#F5F3FF", display:"flex", flexDirection:"column", alignItems:"center", padding:"24px 16px 48px"};
+
+  // ── HOME ──────────────────────────────────────────────
+  if (sc === "home") return (
+    <div style={base}>
+      <div style={{fontSize:52, marginBottom:4, textAlign:"center"}}>✖️</div>
+      <h1 style={{fontSize:26, fontWeight:700, color:PU, margin:"0 0 2px", textAlign:"center"}}>Таблица умножения</h1>
+      <p style={{fontSize:14, color:"#6B7280", margin:"0 0 28px"}}>Умная тренировка</p>
+
+      <div style={{...W, marginBottom:18}}>
+        <div style={{fontSize:13, color:"#6B7280", marginBottom:7}}>Имя ученика</div>
+        <input value={nm} onChange={e => setNm(e.target.value)} placeholder="Например, Вася"
+          style={{width:"100%", padding:"12px 14px", borderRadius:12, border:"1.5px solid #D1D5DB", fontSize:16, outline:"none", background:"#fff"}} />
+      </div>
+
+      <div style={{...W, marginBottom:30}}>
+        <div style={{fontSize:13, color:"#6B7280", marginBottom:9}}>Таблицы для тренировки</div>
+        <div style={{display:"flex", flexWrap:"wrap", gap:9}}>
+          {NUMS.map(n => {
+            const s = tbs.includes(n);
+            return (
+              <button key={n}
+                onClick={() => setTbs(p => s ? (p.length > 1 ? p.filter(x => x!==n) : p) : [...p, n])}
+                style={{width:54, height:54, borderRadius:13, border: s ? `2.5px solid ${PU}` : "1.5px solid #D1D5DB", background: s ? PL : "#fff", color: s ? PU : "#6B7280", fontWeight: s ? 700 : 400, fontSize:17, cursor:"pointer", transition:"all 0.15s"}}>
+                ×{n}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <button onClick={startTrain}
+        style={{...W, height:56, borderRadius:16, background: tbs.length ? PU : "#9CA3AF", color:"#fff", fontSize:18, fontWeight:700, border:"none", cursor:"pointer", marginBottom:12, transition:"background 0.2s"}}>
+        Начать тренировку ▶
+      </button>
+      <button onClick={() => { setPinI(""); setPinE(false); setSc("parent_pin"); }}
+        style={{...W, height:46, borderRadius:13, background:"transparent", color:"#6B7280", fontSize:14, border:"1.5px solid #D1D5DB", cursor:"pointer"}}>
+        Статистика для родителей
+      </button>
+    </div>
+  );
+
+  // ── TRAIN ─────────────────────────────────────────────
+  if (sc === "train" && fact) {
+    const pct = (sTot / SES) * 100;
+    const bgMap = {ok:"#F0FDF4", err:"#FFF1F2", q:"#F5F3FF"};
+    const numRows = [["1","2","3"],["4","5","6"],["7","8","9"],["del","0","ok"]];
+    return (
+      <div style={{...base, background: bgMap[ph]||bgMap.q, transition:"background 0.3s"}}>
+        <div style={{...W, marginBottom:22}}>
+          <div style={{display:"flex", justifyContent:"space-between", fontSize:14, color:"#6B7280", marginBottom:7}}>
+            <span>Ответов: {sTot} / {SES}</span>
+            <span style={{color:GR, fontWeight:700}}>✓ {sCor}</span>
+          </div>
+          <div style={{height:9, background:"#E5E7EB", borderRadius:5, overflow:"hidden"}}>
+            <div style={{height:"100%", width:`${pct}%`, background:PU, borderRadius:5, transition:"width 0.4s"}} />
+          </div>
+        </div>
+
+        <div style={{...W, background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:22, padding:"34px 22px 26px", marginBottom:22, textAlign:"center", boxShadow:"0 4px 16px rgba(0,0,0,0.07)"}}>
+          <div style={{fontSize:50, fontWeight:800, color:"#1F2937", letterSpacing:3, marginBottom:22}}>
+            {fact.a} × {fact.b} = ?
+          </div>
+          <div style={{height:68, display:"flex", alignItems:"center", justifyContent:"center", background:"#F9FAFB", borderRadius:14, fontSize:38, fontWeight:800,
+            color: ph==="ok" ? GR : ph==="err" ? RD : PU,
+            border: ph==="ok" ? `2.5px solid ${GR}` : ph==="err" ? `2.5px solid ${RD}` : `2.5px solid ${PU}`,
+            transition:"all 0.25s"}}>
+            {ph==="ok" && `✓ ${fact.a * fact.b}`}
+            {ph==="err" && `✗  ${fact.a * fact.b}`}
+            {ph==="q" && (ans || <span style={{color:"#D1D5DB", fontSize:30}}>—</span>)}
+          </div>
+        </div>
+
+        <div style={{...W, display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:11}}>
+          {numRows.flat().map((d, i) => {
+            if (d === "ok") return (
+              <button key="ok" onClick={() => sf.current()}
+                style={{height:72, borderRadius:16, background: ans ? PU : "#E5E7EB", color: ans ? "#fff" : "#9CA3AF", fontSize:30, fontWeight:800, border:"none", cursor: ans ? "pointer" : "default", transition:"all 0.2s"}}>
+                =
+              </button>
+            );
+            if (d === "del") return (
+              <button key="del" onClick={() => pf.current("del")}
+                style={{height:72, borderRadius:16, background:"#E5E7EB", color:"#4B5563", fontSize:22, fontWeight:600, border:"none", cursor:"pointer"}}>
+                ←
+              </button>
+            );
+            return (
+              <button key={d} onClick={() => pf.current(d)}
+                style={{height:72, borderRadius:16, background:"#fff", color:"#1F2937", fontSize:30, fontWeight:700, border:"1.5px solid #E5E7EB", cursor:"pointer", boxShadow:"0 2px 6px rgba(0,0,0,0.07)"}}>
+                {d}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  // ── RESULTS ───────────────────────────────────────────
+  if (sc === "results") {
+    const pct = Math.round((sCor / SES) * 100);
+    const st = pct >= 90 ? 3 : pct >= 70 ? 2 : 1;
+    const msg = pct >= 90 ? "Отлично!" : pct >= 70 ? "Хорошо! Так держать!" : "Продолжай — всё получится!";
+    const weak = Object.entries(data.facts || {})
+      .filter(([k, f]) => { const [a] = k.split("x").map(Number); return tbs.includes(a) && f.c+f.w > 0 && f.c/(f.c+f.w) < 0.5; })
+      .sort((a, b) => a[1].c/(a[1].c+a[1].w) - b[1].c/(b[1].c+b[1].w)).slice(0, 6);
+    return (
+      <div style={base}>
+        <div style={{...W, background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:22, padding:"34px 22px", marginBottom:18, textAlign:"center", boxShadow:"0 4px 16px rgba(0,0,0,0.07)"}}>
+          <div style={{fontSize:44, color:"#F59E0B", letterSpacing:7, marginBottom:14}}>{"★".repeat(st) + "☆".repeat(3-st)}</div>
+          <div style={{fontSize:22, fontWeight:700, color:PU, marginBottom:10}}>{msg}</div>
+          <div style={{fontSize:40, fontWeight:800, color:"#1F2937", marginBottom:4}}>{sCor} / {SES}</div>
+          <div style={{fontSize:15, color:"#6B7280"}}>правильных ответов ({pct}%)</div>
+        </div>
+
+        {weak.length > 0 && (
+          <div style={{...W, marginBottom:18}}>
+            <div style={{fontSize:13, color:"#6B7280", marginBottom:9}}>Нужно ещё потренировать</div>
+            <div style={{display:"flex", flexWrap:"wrap", gap:7}}>
+              {weak.map(([k]) => { const [a,b] = k.split("x"); return <span key={k} style={{padding:"6px 13px", background:"#FEF2F2", color:"#991B1B", borderRadius:9, fontSize:15, fontWeight:600}}>{a}×{b}={Number(a)*Number(b)}</span>; })}
+            </div>
+          </div>
+        )}
+
+        <button onClick={startTrain}
+          style={{...W, height:56, borderRadius:16, background:PU, color:"#fff", fontSize:18, fontWeight:700, border:"none", cursor:"pointer", marginBottom:12}}>
+          Тренироваться снова ▶
+        </button>
+        <button onClick={() => setSc("home")}
+          style={{...W, height:46, borderRadius:13, background:"transparent", color:"#6B7280", fontSize:15, border:"1.5px solid #D1D5DB", cursor:"pointer"}}>
+          На главную
+        </button>
+      </div>
+    );
+  }
+
+  // ── PARENT PIN ────────────────────────────────────────
+  if (sc === "parent_pin") {
+    const rows = [["1","2","3"],["4","5","6"],["7","8","9"],["","0","del"]];
+    return (
+      <div style={{...base, justifyContent:"center"}}>
+        <div style={{...W, textAlign:"center"}}>
+          <div style={{fontSize:22, fontWeight:700, color:PU, marginBottom:5}}>Статистика для родителей</div>
+          <div style={{fontSize:14, color:"#6B7280", marginBottom:22}}>Введите PIN (по умолчанию: {PPIN})</div>
+          <div style={{fontSize:36, letterSpacing:18, marginBottom:10, height:52, display:"flex", alignItems:"center", justifyContent:"center"}}>
+            {"●".repeat(pinI.length) + "○".repeat(4-pinI.length)}
+          </div>
+          {pinE && <div style={{fontSize:14, color:RD, marginBottom:10}}>Неверный PIN</div>}
+          <div style={{display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:10, marginBottom:14}}>
+            {rows.flat().map((d, i) => {
+              if (!d) return <div key={i} />;
+              return (
+                <button key={i} onClick={() => {
+                  if (d === "del") { setPinI(p => p.slice(0,-1)); return; }
+                  const np = pinI + d; setPinI(np);
+                  if (np.length === 4) {
+                    if (np === PPIN) { setSc("parent"); setPinI(""); }
+                    else { setPinE(true); setTimeout(() => { setPinI(""); setPinE(false); }, 900); }
+                  }
+                }}
+                style={{height:68, borderRadius:14, background:"#fff", color:"#1F2937", fontSize: d==="del" ? 20 : 28, fontWeight:700, border:"1.5px solid #E5E7EB", cursor:"pointer", boxShadow:"0 2px 6px rgba(0,0,0,0.07)"}}>
+                  {d === "del" ? "←" : d}
+                </button>
+              );
+            })}
+          </div>
+          <button onClick={() => setSc("home")}
+            style={{...W, height:44, borderRadius:13, background:"transparent", color:"#6B7280", fontSize:14, border:"1.5px solid #D1D5DB", cursor:"pointer"}}>
+            Назад
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── PARENT STATS ──────────────────────────────────────
+  if (sc === "parent") {
+    const sess = data.sessions || [];
+    const facts = data.facts || {};
+    const allQ = sess.reduce((s,x) => s+x.total, 0);
+    const allC = sess.reduce((s,x) => s+x.correct, 0);
+    const acc = allQ > 0 ? Math.round(allC/allQ*100) : 0;
+    const topBad = Object.entries(facts)
+      .filter(([,f]) => f.c+f.w > 2)
+      .sort((a,b) => a[1].c/(a[1].c+a[1].w) - b[1].c/(b[1].c+b[1].w))
+      .slice(0, 5);
+
+    return (
+      <div style={base}>
+        <div style={{...W, display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:18}}>
+          <h2 style={{fontSize:22, fontWeight:700, margin:0, color:PU}}>Статистика</h2>
+          <button onClick={() => setSc("home")} style={{height:36, padding:"0 16px", borderRadius:9, background:"transparent", color:"#6B7280", fontSize:14, border:"1.5px solid #D1D5DB", cursor:"pointer"}}>Выход</button>
+        </div>
+
+        <div style={{...W, display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:9, marginBottom:18}}>
+          {[["Сессий", sess.length], ["Вопросов", allQ], ["Точность", `${acc}%`]].map(([l,v]) => (
+            <div key={l} style={{background:"#fff", borderRadius:12, padding:"14px 8px", textAlign:"center", border:"1.5px solid #E5E7EB"}}>
+              <div style={{fontSize:11, color:"#6B7280", marginBottom:5}}>{l}</div>
+              <div style={{fontSize:24, fontWeight:800, color:"#1F2937"}}>{v}</div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{...W, background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:18, padding:"16px 12px", marginBottom:16}}>
+          <div style={{fontSize:14, fontWeight:700, marginBottom:12, color:"#374151"}}>Тепловая карта усвоения</div>
+          <div style={{display:"flex", gap:2, marginBottom:4}}>
+            <div style={{width:22}} />
+            {NUMS.map(b => <div key={b} style={{flex:1, textAlign:"center", fontSize:9, color:"#9CA3AF"}}>{b}</div>)}
+          </div>
+          {NUMS.map(a => (
+            <div key={a} style={{display:"flex", gap:2, marginBottom:2}}>
+              <div style={{width:22, fontSize:9, color:"#9CA3AF", display:"flex", alignItems:"center"}}>{a}</div>
+              {NUMS.map(b => {
+                const f = facts[`${a}x${b}`];
+                const {bg, tx} = hc(f);
+                const p = f && f.c+f.w > 0 ? Math.round(f.c/(f.c+f.w)*100) : null;
+                return (
+                  <div key={b} title={`${a}×${b}=${a*b}: ${p !== null ? p+"%" : "—"}`}
+                    style={{flex:1, height:28, borderRadius:4, background:bg, display:"flex", alignItems:"center", justifyContent:"center", fontSize:8, color:tx, fontWeight:700}}>
+                    {p !== null ? `${p}%` : ""}
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+          <div style={{display:"flex", gap:14, marginTop:12, fontSize:11, color:"#6B7280", flexWrap:"wrap"}}>
+            {[["#E5E7EB","нет данных"],["#4ADE80","отлично (>85%)"],["#F87171","нужна работа (<40%)"]].map(([c,l]) => (
+              <span key={l} style={{display:"flex", alignItems:"center", gap:5}}>
+                <span style={{width:11, height:11, background:c, borderRadius:3, display:"inline-block"}} />{l}
+              </span>
+            ))}
+          </div>
+        </div>
+
+        {topBad.length > 0 && (
+          <div style={{...W, background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:18, padding:"16px 14px", marginBottom:16}}>
+            <div style={{fontSize:14, fontWeight:700, marginBottom:12, color:"#374151"}}>Слабые места</div>
+            <div style={{display:"flex", flexDirection:"column", gap:10}}>
+              {topBad.map(([k, f]) => {
+                const [a, b] = k.split("x");
+                const p = Math.round(f.c/(f.c+f.w)*100);
+                return (
+                  <div key={k} style={{display:"flex", alignItems:"center", gap:12}}>
+                    <span style={{fontWeight:700, fontSize:16, minWidth:68, color:"#1F2937"}}>{a}×{b}={Number(a)*Number(b)}</span>
+                    <div style={{flex:1, height:7, background:"#F3F4F6", borderRadius:4, overflow:"hidden"}}>
+                      <div style={{height:"100%", width:`${p}%`, background: p>=65 ? GR : p>=40 ? "#F59E0B" : RD, borderRadius:4}} />
+                    </div>
+                    <span style={{fontSize:13, color:"#6B7280", minWidth:36, textAlign:"right"}}>{p}%</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {sess.length > 0 && (
+          <div style={{...W, background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:18, padding:"16px 14px"}}>
+            <div style={{fontSize:14, fontWeight:700, marginBottom:12, color:"#374151"}}>История сессий</div>
+            {sess.slice(0, 10).map((s, i) => (
+              <div key={i} style={{display:"flex", alignItems:"center", justifyContent:"space-between", padding:"9px 0", borderBottom: i < Math.min(sess.length,10)-1 ? "1px solid #F3F4F6" : "none"}}>
+                <div>
+                  <div style={{fontSize:13, color:"#1F2937"}}>{fmtD(s.date)}</div>
+                  <div style={{fontSize:11, color:"#9CA3AF"}}>×{(s.tables||[]).join(", ×")} · {fmtS(s.dur)}</div>
+                </div>
+                <div style={{textAlign:"right"}}>
+                  <div style={{fontSize:17, fontWeight:700, color: s.correct/s.total>=0.8 ? GR : s.correct/s.total>=0.6 ? "#D97706" : RD}}>{Math.round(s.correct/s.total*100)}%</div>
+                  <div style={{fontSize:11, color:"#9CA3AF"}}>{s.correct}/{s.total}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {sess.length === 0 && (
+          <div style={{...W, textAlign:"center", padding:"28px 0", color:"#9CA3AF", fontSize:15}}>
+            Пока нет данных. Начните тренировку!
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return null;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
