@@ -10,7 +10,9 @@
 <title>Таблица умножения</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; overflow: hidden; overscroll-behavior: none; }
   body { background: #F5F3FF; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+  #root { height: 100%; overflow-y: auto; overscroll-behavior-y: contain; -webkit-overflow-scrolling: touch; }
   button:active { opacity: 0.75; transform: scale(0.97); }
   input { -webkit-appearance: none; appearance: none; }
 </style>
@@ -124,6 +126,8 @@ function App() {
   const [sCor, setSCor] = useState(0);
   const [sTot, setSTot] = useState(0);
   const t0 = useRef(null);
+  const qTime = useRef(null);
+  const sTimes = useRef([]);
   const [pinI, setPinI] = useState("");
   const [pinE, setPinE] = useState(false);
 
@@ -147,6 +151,8 @@ function App() {
   sf.current = () => {
     const {ph, ans, fact, sCor, sTot, tbs, data} = R.current;
     if (ph !== "q" || !ans || !fact) return;
+    const elapsed = qTime.current ? (Date.now() - qTime.current) / 1000 : 0;
+    sTimes.current.push(elapsed);
     const ok = parseInt(ans) === fact.a * fact.b;
     window.playSound(ok ? "eq" : "wrong");    const nf = {...data.facts};
     const o = nf[fact.k] || {c:0, w:0};
@@ -157,11 +163,16 @@ function App() {
     ud(nd);
     setTimeout(() => {
       if (nT >= SES) {
-        const s = {date: Date.now(), dur: Math.round((Date.now()-t0.current)/1000), correct: nC, total: nT, tables: [...tbs]};
+        const times = sTimes.current;
+        const avgTime = times.length ? Math.round(times.reduce((a,b)=>a+b,0)/times.length*10)/10 : null;
+        const minTime = times.length ? Math.round(Math.min(...times)*10)/10 : null;
+        const maxTime = times.length ? Math.round(Math.max(...times)*10)/10 : null;
+        const s = {date: Date.now(), dur: Math.round((Date.now()-t0.current)/1000), correct: nC, total: nT, tables: [...tbs], avgTime, minTime, maxTime};
         ud({...nd, sessions: [s, ...(nd.sessions||[])].slice(0,30)});
         setSc("results");
       } else {
         setFact(pick(tbs, nf)); setAns(""); setPh("q");
+        qTime.current = Date.now();
       }
     }, ok ? 900 : 1800);
   };
@@ -181,9 +192,11 @@ function App() {
     if (!tbs.length) return;
     const d = {...data, name: nm.trim() || "Ученик"};
     ud(d); t0.current = Date.now();
+    sTimes.current = [];
     setSCor(0); setSTot(0);
     setFact(pick(tbs, d.facts));
     setAns(""); setPh("q"); setSc("train");
+    qTime.current = Date.now();
   };
 
   const W = {width:"100%", maxWidth:420, boxSizing:"border-box"};
@@ -451,6 +464,7 @@ function App() {
                 <div>
                   <div style={{fontSize:13, color:"#1F2937"}}>{fmtD(s.date)}</div>
                   <div style={{fontSize:11, color:"#9CA3AF"}}>×{(s.tables||[]).join(", ×")} · {fmtS(s.dur)}</div>
+                  {s.avgTime != null && <div style={{fontSize:11, color:"#9CA3AF"}}>avg {s.avgTime}с · min {s.minTime}с · max {s.maxTime}с</div>}
                 </div>
                 <div style={{textAlign:"right"}}>
                   <div style={{fontSize:17, fontWeight:700, color: s.correct/s.total>=0.8 ? GR : s.correct/s.total>=0.6 ? "#D97706" : RD}}>{Math.round(s.correct/s.total*100)}%</div>
