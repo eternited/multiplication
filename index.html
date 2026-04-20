@@ -10,14 +10,24 @@
 <title>Таблица умножения</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  html, body { height: 100%; overflow: hidden; overscroll-behavior: none; }
-  body { background: #F5F3FF; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
-  #root { height: 100%; overflow-y: auto; overscroll-behavior-y: contain; -webkit-overflow-scrolling: touch; }
+  html { height: 100%; overscroll-behavior: none; }
+  body {
+    height: 100%; overflow: hidden;
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    overscroll-behavior: none; touch-action: none;
+    background: #F5F3FF; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+  #root { height: 100%; overflow-y: auto; overscroll-behavior-y: contain; touch-action: pan-y; -webkit-overflow-scrolling: touch; }
   button:active { opacity: 0.75; transform: scale(0.97); }
   input { -webkit-appearance: none; appearance: none; }
 </style>
 </head>
 <body>
+<script>
+document.addEventListener('touchmove', function(e) {
+  if (!e.target.closest('#root')) e.preventDefault();
+}, { passive: false });
+</script>
 <div id="root"></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
