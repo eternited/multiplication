@@ -86,7 +86,8 @@ window.playSound = playSound;
 <script type="text/babel">
 const { useState, useEffect, useRef } = React;
 
-const KEY = "mt_v3", PPIN = "1234", SES = 20;
+const KEY = "mt_v3", PPIN = "1234";
+const SES_OPTS = [5, 10, 15, 20];
 const NUMS = [2,3,4,5,6,7,8,9,10];
 const PU = "#534AB7", PL = "#EEEDFE", GR = "#16A34A", RD = "#DC2626";
 
@@ -120,6 +121,7 @@ function App() {
   const [data, setData] = useState(ld);
   const [nm, setNm] = useState(() => ld().name || "");
   const [tbs, setTbs] = useState([2,3,4,5]);
+  const [ses, setSes] = useState(20);
   const [fact, setFact] = useState(null);
   const [ans, setAns] = useState("");
   const [ph, setPh] = useState("q");
@@ -133,7 +135,7 @@ function App() {
 
   const ud = d => { setData(d); sv(d); };
   const R = useRef({});
-  R.current = {ph, ans, fact, sCor, sTot, tbs, data};
+  R.current = {ph, ans, fact, sCor, sTot, tbs, data, ses};
   const sf = useRef(null), pf = useRef(null);
 
   pf.current = d => {
@@ -149,7 +151,7 @@ function App() {
   };
 
   sf.current = () => {
-    const {ph, ans, fact, sCor, sTot, tbs, data} = R.current;
+    const {ph, ans, fact, sCor, sTot, tbs, data, ses} = R.current;
     if (ph !== "q" || !ans || !fact) return;
     const elapsed = qTime.current ? (Date.now() - qTime.current) / 1000 : 0;
     sTimes.current.push(elapsed);
@@ -162,7 +164,7 @@ function App() {
     const nd = {...data, facts: nf};
     ud(nd);
     setTimeout(() => {
-      if (nT >= SES) {
+      if (nT >= ses) {
         const times = sTimes.current;
         const avgTime = times.length ? Math.round(times.reduce((a,b)=>a+b,0)/times.length*10)/10 : null;
         const minTime = times.length ? Math.round(Math.min(...times)*10)/10 : null;
@@ -231,6 +233,21 @@ function App() {
         </div>
       </div>
 
+      <div style={{...W, marginBottom:22}}>
+        <div style={{fontSize:13, color:"#6B7280", marginBottom:9}}>Количество примеров</div>
+        <div style={{display:"flex", gap:9}}>
+          {SES_OPTS.map(n => {
+            const sel = ses === n;
+            return (
+              <button key={n} onClick={() => setSes(n)}
+                style={{flex:1, height:48, borderRadius:13, border: sel ? `2.5px solid ${PU}` : "1.5px solid #D1D5DB", background: sel ? PL : "#fff", color: sel ? PU : "#6B7280", fontWeight: sel ? 700 : 400, fontSize:16, cursor:"pointer", transition:"all 0.15s"}}>
+                {n}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       <button onClick={startTrain}
         style={{...W, height:56, borderRadius:16, background: tbs.length ? PU : "#9CA3AF", color:"#fff", fontSize:18, fontWeight:700, border:"none", cursor:"pointer", marginBottom:12, transition:"background 0.2s"}}>
         Начать тренировку ▶
@@ -244,14 +261,14 @@ function App() {
 
   // ── TRAIN ─────────────────────────────────────────────
   if (sc === "train" && fact) {
-    const pct = (sTot / SES) * 100;
+    const pct = (sTot / ses) * 100;
     const bgMap = {ok:"#F0FDF4", err:"#FFF1F2", q:"#F5F3FF"};
     const numRows = [["1","2","3"],["4","5","6"],["7","8","9"],["del","0","ok"]];
     return (
       <div style={{...base, background: bgMap[ph]||bgMap.q, transition:"background 0.3s"}}>
         <div style={{...W, marginBottom:22}}>
           <div style={{display:"flex", justifyContent:"space-between", fontSize:14, color:"#6B7280", marginBottom:7}}>
-            <span>Ответов: {sTot} / {SES}</span>
+            <span>Ответов: {sTot} / {ses}</span>
             <span style={{color:GR, fontWeight:700}}>✓ {sCor}</span>
           </div>
           <div style={{height:9, background:"#E5E7EB", borderRadius:5, overflow:"hidden"}}>
@@ -301,7 +318,7 @@ function App() {
 
   // ── RESULTS ───────────────────────────────────────────
   if (sc === "results") {
-    const pct = Math.round((sCor / SES) * 100);
+    const pct = Math.round((sCor / ses) * 100);
     const st = pct >= 90 ? 3 : pct >= 70 ? 2 : 1;
     const msg = pct >= 90 ? "Отлично!" : pct >= 70 ? "Хорошо! Так держать!" : "Продолжай — всё получится!";
     const weak = Object.entries(data.facts || {})
@@ -312,7 +329,7 @@ function App() {
         <div style={{...W, background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:22, padding:"34px 22px", marginBottom:18, textAlign:"center", boxShadow:"0 4px 16px rgba(0,0,0,0.07)"}}>
           <div style={{fontSize:44, color:"#F59E0B", letterSpacing:7, marginBottom:14}}>{"★".repeat(st) + "☆".repeat(3-st)}</div>
           <div style={{fontSize:22, fontWeight:700, color:PU, marginBottom:10}}>{msg}</div>
-          <div style={{fontSize:40, fontWeight:800, color:"#1F2937", marginBottom:4}}>{sCor} / {SES}</div>
+          <div style={{fontSize:40, fontWeight:800, color:"#1F2937", marginBottom:4}}>{sCor} / {ses}</div>
           <div style={{fontSize:15, color:"#6B7280"}}>правильных ответов ({pct}%)</div>
         </div>
 
