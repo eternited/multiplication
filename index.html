@@ -32,7 +32,74 @@ document.addEventListener('touchmove', function(e) {
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+
+<script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+
 <script>
+// ─── FIREBASE INIT ────────────────────────────────────────
+const firebaseConfig = {
+  apiKey: "AIzaSyBcEOD0ZJLzCbgniRqeJ_nRFkI9quIF-u4",
+  authDomain: "multiplication-traner.firebaseapp.com",
+  projectId: "multiplication-traner",
+  storageBucket: "multiplication-traner.firebasestorage.app",
+  messagingSenderId: "462329482642",
+  appId: "1:462329482642:web:b35c1ce54cfd15030b054b"
+};
+firebase.initializeApp(firebaseConfig);
+window._auth = firebase.auth();
+window._db = firebase.firestore();
+
+// ─── ADMIN ────────────────────────────────────────────────
+// Захардкоженный пароль администратора — поменяй после первого входа.
+window._ADMIN_NAME = "admin";
+window._ADMIN_PASS = "admin12345";
+
+/*
+─── SUGGESTED FIRESTORE RULES ────────────────────────────
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() { return request.auth != null; }
+    function isAdmin() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+    function isParentOf(childUid) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/parentLinks/$(request.auth.uid)/children/$(childUid));
+    }
+
+    match /users/{userId} {
+      allow read, write: if isSignedIn() && (request.auth.uid == userId || isAdmin() || isParentOf(userId));
+      match /facts/{factId} {
+        allow read: if isSignedIn() && (request.auth.uid == userId || isAdmin() || isParentOf(userId));
+        allow write: if isSignedIn() && request.auth.uid == userId;
+      }
+      match /sessions/{sessionId} {
+        allow read: if isSignedIn() && (request.auth.uid == userId || isAdmin() || isParentOf(userId));
+        allow write: if isSignedIn() && request.auth.uid == userId;
+      }
+    }
+
+    match /parentLinks/{parentUid}/children/{childUid} {
+      allow read: if isSignedIn() && (request.auth.uid == parentUid || isAdmin());
+      allow write: if isSignedIn() && (request.auth.uid == parentUid || isAdmin());
+    }
+
+    match /inviteCodes/{code} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn();
+    }
+  }
+}
+*/
+</script>
+
+<script>
+// ─── AUDIO ────────────────────────────────────────────────
 const AudioCtx = window.AudioContext || window.webkitAudioContext;
 let _ctx = null;
 const getCtx = () => { if (!_ctx) _ctx = new AudioCtx(); return _ctx; };
@@ -46,7 +113,6 @@ const playSound = (type) => {
     o.connect(g);
 
     if (type === "num") {
-      // Мягкий средний блип
       o.type = "sine";
       o.frequency.setValueAtTime(440, ctx.currentTime);
       o.frequency.exponentialRampToValueAtTime(330, ctx.currentTime + 0.07);
@@ -55,7 +121,6 @@ const playSound = (type) => {
       o.start(ctx.currentTime);
       o.stop(ctx.currentTime + 0.09);
     } else if (type === "del") {
-      // Lower dull thud
       o.type = "sine";
       o.frequency.setValueAtTime(320, ctx.currentTime);
       o.frequency.exponentialRampToValueAtTime(180, ctx.currentTime + 0.1);
@@ -64,7 +129,6 @@ const playSound = (type) => {
       o.start(ctx.currentTime);
       o.stop(ctx.currentTime + 0.12);
     } else if (type === "eq") {
-      // Двойной восходящий перезвон — правильный ответ
       [0, 0.1].forEach((delay, i) => {
         const o2 = ctx.createOscillator();
         const g2 = ctx.createGain();
@@ -78,7 +142,6 @@ const playSound = (type) => {
       });
       return;
     } else if (type === "wrong") {
-      // Нисходящий грустный звук — неправильный ответ
       o.type = "sawtooth";
       o.frequency.setValueAtTime(300, ctx.currentTime);
       o.frequency.exponentialRampToValueAtTime(120, ctx.currentTime + 0.35);
@@ -93,18 +156,24 @@ const playSound = (type) => {
 
 window.playSound = playSound;
 </script>
-<script type="text/babel">
-const { useState, useEffect, useRef } = React;
 
-const KEY = "mt_v3", PPIN = "1234";
+<script type="text/babel">
+const { useState, useEffect, useRef, useMemo } = React;
+
+const auth = window._auth;
+const db = window._db;
+const ADMIN_NAME = window._ADMIN_NAME;
+const ADMIN_PASS = window._ADMIN_PASS;
+
 const SES_OPTS = [5, 10, 15, 20];
 const NUMS = [2,3,4,5,6,7,8,9,10];
 const PU = "#534AB7", PL = "#EEEDFE", GR = "#16A34A", RD = "#DC2626";
 
-const ld = () => { try { return JSON.parse(localStorage.getItem(KEY)) || {facts:{},sessions:[]} } catch(e) { return {facts:{},sessions:[]} }};
-const sv = d => { try { localStorage.setItem(KEY, JSON.stringify(d)) } catch(e) {}};
-const wt = f => !f || f.c+f.w===0 ? 0.65 : Math.max(0.1, 1 - f.c/(f.c+f.w+0.5));
+// ─── HELPERS ─────────────────────────────────────────────
+const nameToEmail = (n) => n.trim().toLowerCase().replace(/\s+/g, "_") + "@multiplication.app";
+const gen6 = () => String(Math.floor(100000 + Math.random() * 900000));
 
+const wt = f => !f || f.c+f.w===0 ? 0.65 : Math.max(0.1, 1 - f.c/(f.c+f.w+0.5));
 const pick = (tbs, facts) => {
   const pool = tbs.flatMap(a => NUMS.map(b => ({a, b, k:`${a}x${b}`})));
   const ws = pool.map(p => wt(facts[p.k]));
@@ -124,12 +193,224 @@ const hc = f => {
 };
 
 const fmtD = ts => new Date(ts).toLocaleDateString("ru-RU", {day:"numeric", month:"short", hour:"2-digit", minute:"2-digit"});
+const fmtDay = ts => new Date(ts).toLocaleDateString("ru-RU", {day:"numeric", month:"short"});
 const fmtS = s => s < 60 ? `${s}с` : `${Math.floor(s/60)}м ${s%60}с`;
 
+// ─── FIRESTORE I/O ───────────────────────────────────────
+async function loadUserData(uid) {
+  const userDoc = await db.collection("users").doc(uid).get();
+  if (!userDoc.exists) return null;
+  const profile = userDoc.data();
+  const factsSnap = await db.collection("users").doc(uid).collection("facts").get();
+  const facts = {};
+  factsSnap.forEach(d => facts[d.id] = d.data());
+  const sessSnap = await db.collection("users").doc(uid).collection("sessions").orderBy("date", "desc").limit(50).get();
+  const sessions = [];
+  sessSnap.forEach(d => sessions.push({id: d.id, ...d.data()}));
+  return { uid, profile, facts, sessions };
+}
+
+async function ensureInviteCode(uid, profile) {
+  if (profile.inviteCode) return profile.inviteCode;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const code = gen6();
+    const ref = db.collection("inviteCodes").doc(code);
+    try {
+      const exists = await ref.get();
+      if (exists.exists) continue;
+      await ref.set({ childUid: uid, createdAt: Date.now(), used: false });
+      await db.collection("users").doc(uid).update({ inviteCode: code });
+      return code;
+    } catch(e) {}
+  }
+  return null;
+}
+
+async function linkParentToChildByCode(parentUid, code) {
+  const ref = db.collection("inviteCodes").doc(code);
+  const snap = await ref.get();
+  if (!snap.exists) return { ok: false, error: "Код не найден" };
+  const { childUid } = snap.data();
+  const childDoc = await db.collection("users").doc(childUid).get();
+  if (!childDoc.exists) return { ok: false, error: "Ребёнок не найден" };
+  const childProfile = childDoc.data();
+  if (childProfile.role !== "child") return { ok: false, error: "Это не аккаунт ребёнка" };
+  await db.collection("parentLinks").doc(parentUid).collection("children").doc(childUid).set({
+    name: childProfile.name, linkedAt: Date.now()
+  });
+  await ref.update({ used: true, lastLinkedAt: Date.now() });
+  return { ok: true, name: childProfile.name };
+}
+
+// ─── APP ─────────────────────────────────────────────────
+const W = {width:"100%", maxWidth:420, boxSizing:"border-box"};
+const base = {minHeight:"100vh", background:"#F5F3FF", display:"flex", flexDirection:"column", alignItems:"center", padding:"24px 16px 48px"};
+
 function App() {
+  const [authState, setAuthState] = useState("loading");
+  const [user, setUser] = useState(null);
+  const [profile, setProfile] = useState(null);
+
+  useEffect(() => {
+    const unsub = auth.onAuthStateChanged(async u => {
+      if (!u) { setAuthState("guest"); setUser(null); setProfile(null); return; }
+      try {
+        const doc = await db.collection("users").doc(u.uid).get();
+        if (!doc.exists) { await auth.signOut(); setAuthState("guest"); return; }
+        const p = doc.data();
+        setUser(u); setProfile(p);
+        setAuthState(p.role || "child");
+      } catch(e) {
+        console.error(e); setAuthState("guest");
+      }
+    });
+    return () => unsub();
+  }, []);
+
+  const logout = () => auth.signOut();
+
+  if (authState === "loading") return (
+    <div style={{...base, justifyContent:"center"}}>
+      <div style={{fontSize:18, color:"#6B7280"}}>Загрузка…</div>
+    </div>
+  );
+
+  if (authState === "guest") return <AuthScreen />;
+  if (authState === "child") return <ChildApp user={user} profile={profile} onLogout={logout} />;
+  if (authState === "parent") return <ParentApp user={user} profile={profile} onLogout={logout} />;
+  if (authState === "admin") return <AdminApp user={user} profile={profile} onLogout={logout} />;
+  return null;
+}
+
+// ─── AUTH SCREEN ─────────────────────────────────────────
+function AuthScreen() {
+  const [tab, setTab] = useState("login");
+  const [name, setName] = useState("");
+  const [pass, setPass] = useState("");
+  const [role, setRole] = useState("child");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    setErr("");
+    const n = name.trim();
+    if (!n) { setErr("Введите имя"); return; }
+    if (pass.length < 6) { setErr("Пароль минимум 6 символов"); return; }
+    setBusy(true);
+    try {
+      const isAdminLogin = n.toLowerCase() === ADMIN_NAME && pass === ADMIN_PASS;
+      const email = nameToEmail(n);
+      if (tab === "login") {
+        if (isAdminLogin) {
+          try { await auth.signInWithEmailAndPassword(email, pass); }
+          catch(e) {
+            if (e.code === "auth/user-not-found" || e.code === "auth/invalid-credential" || e.code === "auth/invalid-login-credentials") {
+              const cred = await auth.createUserWithEmailAndPassword(email, pass);
+              await db.collection("users").doc(cred.user.uid).set({
+                name: n, role: "admin", createdAt: Date.now()
+              });
+            } else throw e;
+          }
+        } else {
+          await auth.signInWithEmailAndPassword(email, pass);
+        }
+      } else {
+        if (n.toLowerCase() === ADMIN_NAME) { setErr("Имя 'admin' зарезервировано"); setBusy(false); return; }
+        const cred = await auth.createUserWithEmailAndPassword(email, pass);
+        const profile = { name: n, role, createdAt: Date.now() };
+        await db.collection("users").doc(cred.user.uid).set(profile);
+        if (role === "child") {
+          await ensureInviteCode(cred.user.uid, profile);
+        }
+      }
+    } catch(e) {
+      const map = {
+        "auth/email-already-in-use": "Такое имя уже занято",
+        "auth/wrong-password": "Неверный пароль",
+        "auth/user-not-found": "Пользователь не найден",
+        "auth/invalid-credential": "Неверное имя или пароль",
+        "auth/invalid-login-credentials": "Неверное имя или пароль",
+        "auth/weak-password": "Слабый пароль",
+        "auth/invalid-email": "Недопустимое имя"
+      };
+      setErr(map[e.code] || e.message || "Ошибка");
+    }
+    setBusy(false);
+  };
+
+  return (
+    <div style={base}>
+      <div style={{fontSize:52, marginBottom:4, textAlign:"center"}}>✖️</div>
+      <h1 style={{fontSize:26, fontWeight:700, color:PU, margin:"0 0 2px", textAlign:"center"}}>Таблица умножения</h1>
+      <p style={{fontSize:14, color:"#6B7280", margin:"0 0 24px"}}>Умная тренировка</p>
+
+      <div style={{...W, display:"flex", marginBottom:18, background:"#fff", borderRadius:12, padding:4, border:"1.5px solid #E5E7EB"}}>
+        {["login","register"].map(t => (
+          <button key={t} onClick={() => { setTab(t); setErr(""); }}
+            style={{flex:1, height:42, borderRadius:9, border:"none", background: tab===t ? PU : "transparent", color: tab===t ? "#fff" : "#6B7280", fontSize:15, fontWeight:600, cursor:"pointer"}}>
+            {t === "login" ? "Войти" : "Создать аккаунт"}
+          </button>
+        ))}
+      </div>
+
+      <div style={{...W, marginBottom:14}}>
+        <div style={{fontSize:13, color:"#6B7280", marginBottom:7}}>Имя</div>
+        <input value={name} onChange={e => setName(e.target.value)} placeholder="Вася"
+          style={{width:"100%", padding:"12px 14px", borderRadius:12, border:"1.5px solid #D1D5DB", fontSize:16, outline:"none", background:"#fff"}} />
+      </div>
+
+      <div style={{...W, marginBottom: tab === "register" ? 14 : 18}}>
+        <div style={{fontSize:13, color:"#6B7280", marginBottom:7}}>Пароль</div>
+        <input value={pass} onChange={e => setPass(e.target.value)} type="password" placeholder="Минимум 6 символов"
+          style={{width:"100%", padding:"12px 14px", borderRadius:12, border:"1.5px solid #D1D5DB", fontSize:16, outline:"none", background:"#fff"}} />
+      </div>
+
+      {tab === "register" && (
+        <div style={{...W, marginBottom:18}}>
+          <div style={{fontSize:13, color:"#6B7280", marginBottom:7}}>Кто ты?</div>
+          <div style={{display:"flex", gap:9}}>
+            {[["child","Я ребёнок"], ["parent","Я родитель"]].map(([v,l]) => {
+              const sel = role === v;
+              return (
+                <button key={v} onClick={() => setRole(v)}
+                  style={{flex:1, height:48, borderRadius:13, border: sel ? `2.5px solid ${PU}` : "1.5px solid #D1D5DB", background: sel ? PL : "#fff", color: sel ? PU : "#6B7280", fontWeight: sel ? 700 : 500, fontSize:15, cursor:"pointer"}}>
+                  {l}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {err && <div style={{...W, color:RD, fontSize:14, marginBottom:12, textAlign:"center"}}>{err}</div>}
+
+      <button onClick={submit} disabled={busy}
+        style={{...W, height:56, borderRadius:16, background: busy ? "#9CA3AF" : PU, color:"#fff", fontSize:18, fontWeight:700, border:"none", cursor: busy ? "default" : "pointer"}}>
+        {busy ? "..." : (tab === "login" ? "Войти" : "Создать аккаунт")}
+      </button>
+    </div>
+  );
+}
+
+// ─── HEADER ──────────────────────────────────────────────
+function Header({ name, badge, onLogout }) {
+  return (
+    <div style={{...W, display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:18}}>
+      <div>
+        <div style={{fontSize:11, color:"#9CA3AF", textTransform:"uppercase", letterSpacing:1}}>{badge}</div>
+        <div style={{fontSize:20, fontWeight:700, color:"#1F2937"}}>{name}</div>
+      </div>
+      <button onClick={onLogout} style={{height:36, padding:"0 14px", borderRadius:9, background:"transparent", color:"#6B7280", fontSize:14, border:"1.5px solid #D1D5DB", cursor:"pointer"}}>Выход</button>
+    </div>
+  );
+}
+
+// ─── CHILD APP ───────────────────────────────────────────
+function ChildApp({ user, profile, onLogout }) {
   const [sc, setSc] = useState("home");
-  const [data, setData] = useState(ld);
-  const [nm, setNm] = useState(() => ld().name || "");
+  const [facts, setFacts] = useState({});
+  const [sessions, setSessions] = useState([]);
+  const [inviteCode, setInviteCode] = useState(profile.inviteCode || "");
   const [tbs, setTbs] = useState([2,3,4,5]);
   const [ses, setSes] = useState(20);
   const [fact, setFact] = useState(null);
@@ -140,12 +421,20 @@ function App() {
   const t0 = useRef(null);
   const qTime = useRef(null);
   const sTimes = useRef([]);
-  const [pinI, setPinI] = useState("");
-  const [pinE, setPinE] = useState(false);
 
-  const ud = d => { setData(d); sv(d); };
+  useEffect(() => {
+    (async () => {
+      const data = await loadUserData(user.uid);
+      if (data) { setFacts(data.facts); setSessions(data.sessions); }
+      if (!inviteCode) {
+        const c = await ensureInviteCode(user.uid, profile);
+        if (c) setInviteCode(c);
+      }
+    })();
+  }, []);
+
   const R = useRef({});
-  R.current = {ph, ans, fact, sCor, sTot, tbs, data, ses};
+  R.current = {ph, ans, fact, sCor, sTot, tbs, ses, facts};
   const sf = useRef(null), pf = useRef(null);
 
   pf.current = d => {
@@ -161,18 +450,19 @@ function App() {
   };
 
   sf.current = () => {
-    const {ph, ans, fact, sCor, sTot, tbs, data, ses} = R.current;
+    const {ph, ans, fact, sCor, sTot, tbs, ses, facts} = R.current;
     if (ph !== "q" || !ans || !fact) return;
     const elapsed = qTime.current ? (Date.now() - qTime.current) / 1000 : 0;
     sTimes.current.push(elapsed);
     const ok = parseInt(ans) === fact.a * fact.b;
-    window.playSound(ok ? "eq" : "wrong");    const nf = {...data.facts};
-    const o = nf[fact.k] || {c:0, w:0};
-    nf[fact.k] = {c: o.c+(ok?1:0), w: o.w+(ok?0:1), t: Date.now()};
+    window.playSound(ok ? "eq" : "wrong");
+    const o = facts[fact.k] || {c:0, w:0};
+    const nf = {c: o.c+(ok?1:0), w: o.w+(ok?0:1), t: Date.now()};
+    const updatedFacts = {...facts, [fact.k]: nf};
+    setFacts(updatedFacts);
+    db.collection("users").doc(user.uid).collection("facts").doc(fact.k).set(nf).catch(()=>{});
     const nT = sTot+1, nC = sCor+(ok?1:0);
     setSTot(nT); setSCor(nC); setPh(ok ? "ok" : "err");
-    const nd = {...data, facts: nf};
-    ud(nd);
     setTimeout(() => {
       if (nT >= ses) {
         const times = sTimes.current;
@@ -180,10 +470,11 @@ function App() {
         const minTime = times.length ? Math.round(Math.min(...times)*10)/10 : null;
         const maxTime = times.length ? Math.round(Math.max(...times)*10)/10 : null;
         const s = {date: Date.now(), dur: Math.round((Date.now()-t0.current)/1000), correct: nC, total: nT, tables: [...tbs], avgTime, minTime, maxTime};
-        ud({...nd, sessions: [s, ...(nd.sessions||[])].slice(0,30)});
+        db.collection("users").doc(user.uid).collection("sessions").add(s).catch(()=>{});
+        setSessions(prev => [s, ...prev].slice(0, 50));
         setSc("results");
       } else {
-        setFact(pick(tbs, nf)); setAns(""); setPh("q");
+        setFact(pick(tbs, updatedFacts)); setAns(""); setPh("q");
         qTime.current = Date.now();
       }
     }, ok ? 900 : 1800);
@@ -202,32 +493,30 @@ function App() {
 
   const startTrain = () => {
     if (!tbs.length) return;
-    const d = {...data, name: nm.trim() || "Ученик"};
-    ud(d); t0.current = Date.now();
+    t0.current = Date.now();
     sTimes.current = [];
     setSCor(0); setSTot(0);
-    setFact(pick(tbs, d.facts));
+    setFact(pick(tbs, facts));
     setAns(""); setPh("q"); setSc("train");
     qTime.current = Date.now();
   };
 
-  const W = {width:"100%", maxWidth:420, boxSizing:"border-box"};
-  const base = {minHeight:"100vh", background:"#F5F3FF", display:"flex", flexDirection:"column", alignItems:"center", padding:"24px 16px 48px"};
-
-  // ── HOME ──────────────────────────────────────────────
+  // ── HOME ────────────────────────────────────────────────
   if (sc === "home") return (
     <div style={base}>
-      <div style={{fontSize:52, marginBottom:4, textAlign:"center"}}>✖️</div>
-      <h1 style={{fontSize:26, fontWeight:700, color:PU, margin:"0 0 2px", textAlign:"center"}}>Таблица умножения</h1>
-      <p style={{fontSize:14, color:"#6B7280", margin:"0 0 28px"}}>Умная тренировка</p>
+      <Header name={profile.name} badge="Ученик" onLogout={onLogout} />
 
-      <div style={{...W, marginBottom:18}}>
-        <div style={{fontSize:13, color:"#6B7280", marginBottom:7}}>Имя ученика</div>
-        <input value={nm} onChange={e => setNm(e.target.value)} placeholder="Например, Вася"
-          style={{width:"100%", padding:"12px 14px", borderRadius:12, border:"1.5px solid #D1D5DB", fontSize:16, outline:"none", background:"#fff"}} />
-      </div>
+      {inviteCode && (
+        <div style={{...W, background:"#fff", borderRadius:14, padding:"12px 14px", marginBottom:18, border:"1.5px solid #E5E7EB", display:"flex", alignItems:"center", justifyContent:"space-between"}}>
+          <div>
+            <div style={{fontSize:11, color:"#6B7280", marginBottom:2}}>Код для родителя</div>
+            <div style={{fontSize:22, fontWeight:800, color:PU, letterSpacing:4}}>{inviteCode}</div>
+          </div>
+          <div style={{fontSize:24}}>👨‍👩‍👧</div>
+        </div>
+      )}
 
-      <div style={{...W, marginBottom:30}}>
+      <div style={{...W, marginBottom:22}}>
         <div style={{fontSize:13, color:"#6B7280", marginBottom:9}}>Таблицы для тренировки</div>
         <div style={{display:"flex", flexWrap:"wrap", gap:9}}>
           {NUMS.map(n => {
@@ -235,7 +524,7 @@ function App() {
             return (
               <button key={n}
                 onClick={() => setTbs(p => s ? (p.length > 1 ? p.filter(x => x!==n) : p) : [...p, n])}
-                style={{width:54, height:54, borderRadius:13, border: s ? `2.5px solid ${PU}` : "1.5px solid #D1D5DB", background: s ? PL : "#fff", color: s ? PU : "#6B7280", fontWeight: s ? 700 : 400, fontSize:17, cursor:"pointer", transition:"all 0.15s"}}>
+                style={{width:54, height:54, borderRadius:13, border: s ? `2.5px solid ${PU}` : "1.5px solid #D1D5DB", background: s ? PL : "#fff", color: s ? PU : "#6B7280", fontWeight: s ? 700 : 400, fontSize:17, cursor:"pointer"}}>
                 ×{n}
               </button>
             );
@@ -250,7 +539,7 @@ function App() {
             const sel = ses === n;
             return (
               <button key={n} onClick={() => setSes(n)}
-                style={{flex:1, height:48, borderRadius:13, border: sel ? `2.5px solid ${PU}` : "1.5px solid #D1D5DB", background: sel ? PL : "#fff", color: sel ? PU : "#6B7280", fontWeight: sel ? 700 : 400, fontSize:16, cursor:"pointer", transition:"all 0.15s"}}>
+                style={{flex:1, height:48, borderRadius:13, border: sel ? `2.5px solid ${PU}` : "1.5px solid #D1D5DB", background: sel ? PL : "#fff", color: sel ? PU : "#6B7280", fontWeight: sel ? 700 : 400, fontSize:16, cursor:"pointer"}}>
                 {n}
               </button>
             );
@@ -259,23 +548,23 @@ function App() {
       </div>
 
       <button onClick={startTrain}
-        style={{...W, height:56, borderRadius:16, background: tbs.length ? PU : "#9CA3AF", color:"#fff", fontSize:18, fontWeight:700, border:"none", cursor:"pointer", marginBottom:12, transition:"background 0.2s"}}>
+        style={{...W, height:56, borderRadius:16, background: tbs.length ? PU : "#9CA3AF", color:"#fff", fontSize:18, fontWeight:700, border:"none", cursor:"pointer"}}>
         Начать тренировку ▶
-      </button>
-      <button onClick={() => { setPinI(""); setPinE(false); setSc("parent_pin"); }}
-        style={{...W, height:46, borderRadius:13, background:"transparent", color:"#6B7280", fontSize:14, border:"1.5px solid #D1D5DB", cursor:"pointer"}}>
-        Статистика для родителей
       </button>
     </div>
   );
 
-  // ── TRAIN ─────────────────────────────────────────────
+  // ── TRAIN ──────────────────────────────────────────────
   if (sc === "train" && fact) {
     const pct = (sTot / ses) * 100;
     const bgMap = {ok:"#F0FDF4", err:"#FFF1F2", q:"#F5F3FF"};
     const numRows = [["1","2","3"],["4","5","6"],["7","8","9"],["del","0","ok"]];
     return (
       <div style={{...base, background: bgMap[ph]||bgMap.q, transition:"background 0.3s"}}>
+        <div style={{...W, display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12}}>
+          <div style={{fontSize:14, fontWeight:700, color:"#1F2937"}}>{profile.name}</div>
+          <button onClick={() => setSc("home")} style={{height:32, padding:"0 12px", borderRadius:9, background:"transparent", color:"#6B7280", fontSize:13, border:"1.5px solid #D1D5DB", cursor:"pointer"}}>Стоп</button>
+        </div>
         <div style={{...W, marginBottom:22}}>
           <div style={{display:"flex", justifyContent:"space-between", fontSize:14, color:"#6B7280", marginBottom:7}}>
             <span>Ответов: {sTot} / {ses}</span>
@@ -304,7 +593,7 @@ function App() {
           {numRows.flat().map((d, i) => {
             if (d === "ok") return (
               <button key="ok" onClick={() => sf.current()}
-                style={{height:72, borderRadius:16, background: ans ? PU : "#E5E7EB", color: ans ? "#fff" : "#9CA3AF", fontSize:30, fontWeight:800, border:"none", cursor: ans ? "pointer" : "default", transition:"all 0.2s"}}>
+                style={{height:72, borderRadius:16, background: ans ? PU : "#E5E7EB", color: ans ? "#fff" : "#9CA3AF", fontSize:30, fontWeight:800, border:"none", cursor: ans ? "pointer" : "default"}}>
                 =
               </button>
             );
@@ -326,17 +615,17 @@ function App() {
     );
   }
 
-  // ── RESULTS ───────────────────────────────────────────
+  // ── RESULTS ────────────────────────────────────────────
   if (sc === "results") {
     const pct = Math.round((sCor / ses) * 100);
     const st = pct >= 90 ? 3 : pct >= 70 ? 2 : 1;
     const msg = pct >= 90 ? "Отлично!" : pct >= 70 ? "Хорошо! Так держать!" : "Продолжай — всё получится!";
-    const weak = Object.entries(data.facts || {})
+    const weak = Object.entries(facts)
       .filter(([k, f]) => { const [a] = k.split("x").map(Number); return tbs.includes(a) && f.c+f.w > 0 && f.c/(f.c+f.w) < 0.5; })
       .sort((a, b) => a[1].c/(a[1].c+a[1].w) - b[1].c/(b[1].c+b[1].w)).slice(0, 6);
     return (
       <div style={base}>
-        <div style={{...W, background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:22, padding:"34px 22px", marginBottom:18, textAlign:"center", boxShadow:"0 4px 16px rgba(0,0,0,0.07)"}}>
+        <div style={{...W, background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:22, padding:"34px 22px", marginBottom:18, textAlign:"center"}}>
           <div style={{fontSize:44, color:"#F59E0B", letterSpacing:7, marginBottom:14}}>{"★".repeat(st) + "☆".repeat(3-st)}</div>
           <div style={{fontSize:22, fontWeight:700, color:PU, marginBottom:10}}>{msg}</div>
           <div style={{fontSize:40, fontWeight:800, color:"#1F2937", marginBottom:4}}>{sCor} / {ses}</div>
@@ -364,154 +653,356 @@ function App() {
     );
   }
 
-  // ── PARENT PIN ────────────────────────────────────────
-  if (sc === "parent_pin") {
-    const rows = [["1","2","3"],["4","5","6"],["7","8","9"],["","0","del"]];
-    return (
-      <div style={{...base, justifyContent:"center"}}>
-        <div style={{...W, textAlign:"center"}}>
-          <div style={{fontSize:22, fontWeight:700, color:PU, marginBottom:5}}>Статистика для родителей</div>
-          <div style={{fontSize:14, color:"#6B7280", marginBottom:22}}>Введите PIN (по умолчанию: {PPIN})</div>
-          <div style={{fontSize:36, letterSpacing:18, marginBottom:10, height:52, display:"flex", alignItems:"center", justifyContent:"center"}}>
-            {"●".repeat(pinI.length) + "○".repeat(4-pinI.length)}
+  return null;
+}
+
+// ─── STATS VIEW (used by parent & admin) ─────────────────
+function StatsView({ facts, sessions, name, onBack }) {
+  const allQ = sessions.reduce((s,x) => s+(x.total||0), 0);
+  const allC = sessions.reduce((s,x) => s+(x.correct||0), 0);
+  const acc = allQ > 0 ? Math.round(allC/allQ*100) : 0;
+  const topBad = Object.entries(facts || {})
+    .filter(([,f]) => f.c+f.w > 2)
+    .sort((a,b) => a[1].c/(a[1].c+a[1].w) - b[1].c/(b[1].c+b[1].w))
+    .slice(0, 5);
+
+  return (
+    <div style={base}>
+      <div style={{...W, display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:18}}>
+        <h2 style={{fontSize:22, fontWeight:700, margin:0, color:PU}}>{name}</h2>
+        <button onClick={onBack} style={{height:36, padding:"0 14px", borderRadius:9, background:"transparent", color:"#6B7280", fontSize:14, border:"1.5px solid #D1D5DB", cursor:"pointer"}}>Назад</button>
+      </div>
+
+      <div style={{...W, display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:9, marginBottom:18}}>
+        {[["Сессий", sessions.length], ["Вопросов", allQ], ["Точность", `${acc}%`]].map(([l,v]) => (
+          <div key={l} style={{background:"#fff", borderRadius:12, padding:"14px 8px", textAlign:"center", border:"1.5px solid #E5E7EB"}}>
+            <div style={{fontSize:11, color:"#6B7280", marginBottom:5}}>{l}</div>
+            <div style={{fontSize:24, fontWeight:800, color:"#1F2937"}}>{v}</div>
           </div>
-          {pinE && <div style={{fontSize:14, color:RD, marginBottom:10}}>Неверный PIN</div>}
-          <div style={{display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:10, marginBottom:14}}>
-            {rows.flat().map((d, i) => {
-              if (!d) return <div key={i} />;
+        ))}
+      </div>
+
+      <div style={{...W, background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:18, padding:"16px 12px", marginBottom:16}}>
+        <div style={{fontSize:14, fontWeight:700, marginBottom:12, color:"#374151"}}>Тепловая карта усвоения</div>
+        <div style={{display:"flex", gap:2, marginBottom:4}}>
+          <div style={{width:22}} />
+          {NUMS.map(b => <div key={b} style={{flex:1, textAlign:"center", fontSize:9, color:"#9CA3AF"}}>{b}</div>)}
+        </div>
+        {NUMS.map(a => (
+          <div key={a} style={{display:"flex", gap:2, marginBottom:2}}>
+            <div style={{width:22, fontSize:9, color:"#9CA3AF", display:"flex", alignItems:"center"}}>{a}</div>
+            {NUMS.map(b => {
+              const f = (facts || {})[`${a}x${b}`];
+              const {bg, tx} = hc(f);
+              const p = f && f.c+f.w > 0 ? Math.round(f.c/(f.c+f.w)*100) : null;
               return (
-                <button key={i} onClick={() => {
-                  if (d === "del") { setPinI(p => p.slice(0,-1)); return; }
-                  const np = pinI + d; setPinI(np);
-                  if (np.length === 4) {
-                    if (np === PPIN) { setSc("parent"); setPinI(""); }
-                    else { setPinE(true); setTimeout(() => { setPinI(""); setPinE(false); }, 900); }
-                  }
-                }}
-                style={{height:68, borderRadius:14, background:"#fff", color:"#1F2937", fontSize: d==="del" ? 20 : 28, fontWeight:700, border:"1.5px solid #E5E7EB", cursor:"pointer", boxShadow:"0 2px 6px rgba(0,0,0,0.07)"}}>
-                  {d === "del" ? "←" : d}
-                </button>
+                <div key={b} title={`${a}×${b}=${a*b}: ${p !== null ? p+"%" : "—"}`}
+                  style={{flex:1, height:28, borderRadius:4, background:bg, display:"flex", alignItems:"center", justifyContent:"center", fontSize:8, color:tx, fontWeight:700}}>
+                  {p !== null ? `${p}%` : ""}
+                </div>
               );
             })}
           </div>
-          <button onClick={() => setSc("home")}
-            style={{...W, height:44, borderRadius:13, background:"transparent", color:"#6B7280", fontSize:14, border:"1.5px solid #D1D5DB", cursor:"pointer"}}>
-            Назад
-          </button>
-        </div>
+        ))}
       </div>
-    );
+
+      {topBad.length > 0 && (
+        <div style={{...W, background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:18, padding:"16px 14px", marginBottom:16}}>
+          <div style={{fontSize:14, fontWeight:700, marginBottom:12, color:"#374151"}}>Слабые места</div>
+          {topBad.map(([k, f]) => {
+            const [a, b] = k.split("x");
+            const p = Math.round(f.c/(f.c+f.w)*100);
+            return (
+              <div key={k} style={{display:"flex", alignItems:"center", gap:12, marginBottom:8}}>
+                <span style={{fontWeight:700, fontSize:16, minWidth:68, color:"#1F2937"}}>{a}×{b}={Number(a)*Number(b)}</span>
+                <div style={{flex:1, height:7, background:"#F3F4F6", borderRadius:4, overflow:"hidden"}}>
+                  <div style={{height:"100%", width:`${p}%`, background: p>=65 ? GR : p>=40 ? "#F59E0B" : RD, borderRadius:4}} />
+                </div>
+                <span style={{fontSize:13, color:"#6B7280", minWidth:36, textAlign:"right"}}>{p}%</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {sessions.length > 0 ? (
+        <div style={{...W, background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:18, padding:"16px 14px"}}>
+          <div style={{fontSize:14, fontWeight:700, marginBottom:12, color:"#374151"}}>История сессий</div>
+          {sessions.slice(0, 15).map((s, i) => (
+            <div key={i} style={{display:"flex", alignItems:"center", justifyContent:"space-between", padding:"9px 0", borderBottom: i < Math.min(sessions.length,15)-1 ? "1px solid #F3F4F6" : "none"}}>
+              <div>
+                <div style={{fontSize:13, color:"#1F2937"}}>{fmtD(s.date)}</div>
+                <div style={{fontSize:11, color:"#9CA3AF"}}>×{(s.tables||[]).join(", ×")} · {fmtS(s.dur||0)}</div>
+                {s.avgTime != null && <div style={{fontSize:11, color:"#9CA3AF"}}>avg {s.avgTime}с · min {s.minTime}с · max {s.maxTime}с</div>}
+              </div>
+              <div style={{textAlign:"right"}}>
+                <div style={{fontSize:17, fontWeight:700, color: s.correct/s.total>=0.8 ? GR : s.correct/s.total>=0.6 ? "#D97706" : RD}}>{Math.round(s.correct/s.total*100)}%</div>
+                <div style={{fontSize:11, color:"#9CA3AF"}}>{s.correct}/{s.total}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div style={{...W, textAlign:"center", padding:"28px 0", color:"#9CA3AF", fontSize:15}}>
+          Пока нет данных.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── PARENT APP ──────────────────────────────────────────
+function ParentApp({ user, profile, onLogout }) {
+  const [children, setChildren] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [code, setCode] = useState("");
+  const [linkMsg, setLinkMsg] = useState("");
+  const [selected, setSelected] = useState(null);
+  const [childData, setChildData] = useState(null);
+
+  const loadChildren = async () => {
+    setLoading(true);
+    const snap = await db.collection("parentLinks").doc(user.uid).collection("children").get();
+    const list = [];
+    snap.forEach(d => list.push({ uid: d.id, ...d.data() }));
+    setChildren(list);
+    setLoading(false);
+  };
+
+  useEffect(() => { loadChildren(); }, []);
+
+  const doLink = async () => {
+    setLinkMsg("");
+    if (code.length !== 6) { setLinkMsg("Код должен содержать 6 цифр"); return; }
+    const res = await linkParentToChildByCode(user.uid, code);
+    if (res.ok) {
+      setLinkMsg(`Привязан: ${res.name}`);
+      setCode("");
+      loadChildren();
+    } else {
+      setLinkMsg(res.error);
+    }
+  };
+
+  const openChild = async (c) => {
+    setSelected(c);
+    setChildData(null);
+    const data = await loadUserData(c.uid);
+    setChildData(data);
+  };
+
+  if (selected && childData) {
+    return <StatsView name={selected.name} facts={childData.facts} sessions={childData.sessions} onBack={() => { setSelected(null); setChildData(null); }} />;
+  }
+  if (selected && !childData) {
+    return <div style={{...base, justifyContent:"center"}}><div style={{fontSize:16, color:"#6B7280"}}>Загрузка…</div></div>;
   }
 
-  // ── PARENT STATS ──────────────────────────────────────
-  if (sc === "parent") {
-    const sess = data.sessions || [];
-    const facts = data.facts || {};
-    const allQ = sess.reduce((s,x) => s+x.total, 0);
-    const allC = sess.reduce((s,x) => s+x.correct, 0);
-    const acc = allQ > 0 ? Math.round(allC/allQ*100) : 0;
-    const topBad = Object.entries(facts)
-      .filter(([,f]) => f.c+f.w > 2)
-      .sort((a,b) => a[1].c/(a[1].c+a[1].w) - b[1].c/(b[1].c+b[1].w))
-      .slice(0, 5);
+  return (
+    <div style={base}>
+      <Header name={profile.name} badge="Родитель" onLogout={onLogout} />
 
-    return (
-      <div style={base}>
-        <div style={{...W, display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:18}}>
-          <h2 style={{fontSize:22, fontWeight:700, margin:0, color:PU}}>Статистика</h2>
-          <button onClick={() => setSc("home")} style={{height:36, padding:"0 16px", borderRadius:9, background:"transparent", color:"#6B7280", fontSize:14, border:"1.5px solid #D1D5DB", cursor:"pointer"}}>Выход</button>
+      <div style={{...W, background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:14, padding:"14px", marginBottom:16}}>
+        <div style={{fontSize:13, color:"#6B7280", marginBottom:8}}>Привязать ребёнка по коду</div>
+        <div style={{display:"flex", gap:8}}>
+          <input value={code} onChange={e => setCode(e.target.value.replace(/\D/g,"").slice(0,6))}
+            placeholder="6 цифр" inputMode="numeric"
+            style={{flex:1, padding:"12px 14px", borderRadius:12, border:"1.5px solid #D1D5DB", fontSize:18, outline:"none", background:"#fff", letterSpacing:4, textAlign:"center"}} />
+          <button onClick={doLink} style={{padding:"0 18px", borderRadius:12, background:PU, color:"#fff", border:"none", fontWeight:700, cursor:"pointer"}}>OK</button>
         </div>
+        {linkMsg && <div style={{fontSize:13, color: linkMsg.startsWith("Привязан") ? GR : RD, marginTop:8}}>{linkMsg}</div>}
+      </div>
 
-        <div style={{...W, display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:9, marginBottom:18}}>
-          {[["Сессий", sess.length], ["Вопросов", allQ], ["Точность", `${acc}%`]].map(([l,v]) => (
-            <div key={l} style={{background:"#fff", borderRadius:12, padding:"14px 8px", textAlign:"center", border:"1.5px solid #E5E7EB"}}>
-              <div style={{fontSize:11, color:"#6B7280", marginBottom:5}}>{l}</div>
-              <div style={{fontSize:24, fontWeight:800, color:"#1F2937"}}>{v}</div>
-            </div>
+      <div style={{...W, marginBottom:12, fontSize:14, color:"#6B7280"}}>
+        Мои дети {children.length > 0 && `(${children.length})`}
+      </div>
+
+      {loading ? (
+        <div style={{...W, textAlign:"center", padding:20, color:"#9CA3AF"}}>Загрузка…</div>
+      ) : children.length === 0 ? (
+        <div style={{...W, textAlign:"center", padding:"30px 16px", color:"#9CA3AF", background:"#fff", borderRadius:14, border:"1.5px solid #E5E7EB"}}>
+          Пока нет привязанных детей.<br/>Попроси код у ребёнка.
+        </div>
+      ) : (
+        <div style={{...W, display:"flex", flexDirection:"column", gap:9}}>
+          {children.map(c => (
+            <button key={c.uid} onClick={() => openChild(c)}
+              style={{display:"flex", alignItems:"center", justifyContent:"space-between", padding:"14px 16px", background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:14, cursor:"pointer", textAlign:"left"}}>
+              <div>
+                <div style={{fontSize:16, fontWeight:700, color:"#1F2937"}}>{c.name}</div>
+                <div style={{fontSize:11, color:"#9CA3AF"}}>привязан {fmtDay(c.linkedAt)}</div>
+              </div>
+              <div style={{fontSize:18, color:"#9CA3AF"}}>›</div>
+            </button>
           ))}
         </div>
+      )}
+    </div>
+  );
+}
 
-        <div style={{...W, background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:18, padding:"16px 12px", marginBottom:16}}>
-          <div style={{fontSize:14, fontWeight:700, marginBottom:12, color:"#374151"}}>Тепловая карта усвоения</div>
-          <div style={{display:"flex", gap:2, marginBottom:4}}>
-            <div style={{width:22}} />
-            {NUMS.map(b => <div key={b} style={{flex:1, textAlign:"center", fontSize:9, color:"#9CA3AF"}}>{b}</div>)}
-          </div>
-          {NUMS.map(a => (
-            <div key={a} style={{display:"flex", gap:2, marginBottom:2}}>
-              <div style={{width:22, fontSize:9, color:"#9CA3AF", display:"flex", alignItems:"center"}}>{a}</div>
-              {NUMS.map(b => {
-                const f = facts[`${a}x${b}`];
-                const {bg, tx} = hc(f);
-                const p = f && f.c+f.w > 0 ? Math.round(f.c/(f.c+f.w)*100) : null;
-                return (
-                  <div key={b} title={`${a}×${b}=${a*b}: ${p !== null ? p+"%" : "—"}`}
-                    style={{flex:1, height:28, borderRadius:4, background:bg, display:"flex", alignItems:"center", justifyContent:"center", fontSize:8, color:tx, fontWeight:700}}>
-                    {p !== null ? `${p}%` : ""}
-                  </div>
-                );
-              })}
-            </div>
-          ))}
-          <div style={{display:"flex", gap:14, marginTop:12, fontSize:11, color:"#6B7280", flexWrap:"wrap"}}>
-            {[["#E5E7EB","нет данных"],["#4ADE80","отлично (>85%)"],["#F87171","нужна работа (<40%)"]].map(([c,l]) => (
-              <span key={l} style={{display:"flex", alignItems:"center", gap:5}}>
-                <span style={{width:11, height:11, background:c, borderRadius:3, display:"inline-block"}} />{l}
-              </span>
-            ))}
-          </div>
-        </div>
+// ─── ADMIN APP ───────────────────────────────────────────
+function AdminApp({ user, profile, onLogout }) {
+  const [users, setUsers] = useState([]);
+  const [allSessions, setAllSessions] = useState([]);
+  const [allFacts, setAllFacts] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState(null);
+  const [selectedData, setSelectedData] = useState(null);
 
-        {topBad.length > 0 && (
-          <div style={{...W, background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:18, padding:"16px 14px", marginBottom:16}}>
-            <div style={{fontSize:14, fontWeight:700, marginBottom:12, color:"#374151"}}>Слабые места</div>
-            <div style={{display:"flex", flexDirection:"column", gap:10}}>
-              {topBad.map(([k, f]) => {
-                const [a, b] = k.split("x");
-                const p = Math.round(f.c/(f.c+f.w)*100);
-                return (
-                  <div key={k} style={{display:"flex", alignItems:"center", gap:12}}>
-                    <span style={{fontWeight:700, fontSize:16, minWidth:68, color:"#1F2937"}}>{a}×{b}={Number(a)*Number(b)}</span>
-                    <div style={{flex:1, height:7, background:"#F3F4F6", borderRadius:4, overflow:"hidden"}}>
-                      <div style={{height:"100%", width:`${p}%`, background: p>=65 ? GR : p>=40 ? "#F59E0B" : RD, borderRadius:4}} />
-                    </div>
-                    <span style={{fontSize:13, color:"#6B7280", minWidth:36, textAlign:"right"}}>{p}%</span>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
+  useEffect(() => {
+    (async () => {
+      setLoading(true);
+      const snap = await db.collection("users").get();
+      const list = [];
+      const sessAll = [];
+      const factsAggr = {};
+      for (const d of snap.docs) {
+        const data = d.data();
+        list.push({ uid: d.id, ...data });
+        try {
+          const sSnap = await db.collection("users").doc(d.id).collection("sessions").orderBy("date", "desc").limit(30).get();
+          const userSessions = [];
+          sSnap.forEach(s => { const sd = s.data(); userSessions.push(sd); sessAll.push({...sd, _uid: d.id, _name: data.name}); });
+          const lastDate = userSessions[0]?.date || data.createdAt || 0;
+          list[list.length-1].lastActive = lastDate;
+          list[list.length-1].sessionsCount = userSessions.length;
+          const fSnap = await db.collection("users").doc(d.id).collection("facts").get();
+          fSnap.forEach(f => {
+            const fd = f.data();
+            const cur = factsAggr[f.id] || {c:0, w:0};
+            factsAggr[f.id] = { c: cur.c + (fd.c||0), w: cur.w + (fd.w||0) };
+          });
+        } catch(e) {}
+      }
+      list.sort((a, b) => (b.lastActive || 0) - (a.lastActive || 0));
+      setUsers(list);
+      setAllSessions(sessAll);
+      setAllFacts(factsAggr);
+      setLoading(false);
+    })();
+  }, []);
 
-        {sess.length > 0 && (
-          <div style={{...W, background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:18, padding:"16px 14px"}}>
-            <div style={{fontSize:14, fontWeight:700, marginBottom:12, color:"#374151"}}>История сессий</div>
-            {sess.slice(0, 10).map((s, i) => (
-              <div key={i} style={{display:"flex", alignItems:"center", justifyContent:"space-between", padding:"9px 0", borderBottom: i < Math.min(sess.length,10)-1 ? "1px solid #F3F4F6" : "none"}}>
-                <div>
-                  <div style={{fontSize:13, color:"#1F2937"}}>{fmtD(s.date)}</div>
-                  <div style={{fontSize:11, color:"#9CA3AF"}}>×{(s.tables||[]).join(", ×")} · {fmtS(s.dur)}</div>
-                  {s.avgTime != null && <div style={{fontSize:11, color:"#9CA3AF"}}>avg {s.avgTime}с · min {s.minTime}с · max {s.maxTime}с</div>}
-                </div>
-                <div style={{textAlign:"right"}}>
-                  <div style={{fontSize:17, fontWeight:700, color: s.correct/s.total>=0.8 ? GR : s.correct/s.total>=0.6 ? "#D97706" : RD}}>{Math.round(s.correct/s.total*100)}%</div>
-                  <div style={{fontSize:11, color:"#9CA3AF"}}>{s.correct}/{s.total}</div>
-                </div>
+  const openUser = async (u) => {
+    setSelected(u);
+    setSelectedData(null);
+    const data = await loadUserData(u.uid);
+    setSelectedData(data);
+  };
+
+  if (selected && selectedData) {
+    return <StatsView name={selected.name + " · " + (selected.role || "?")} facts={selectedData.facts} sessions={selectedData.sessions} onBack={() => { setSelected(null); setSelectedData(null); }} />;
+  }
+  if (selected && !selectedData) {
+    return <div style={{...base, justifyContent:"center"}}><div style={{fontSize:16, color:"#6B7280"}}>Загрузка…</div></div>;
+  }
+
+  const totalSessions = allSessions.length;
+  const totalQ = allSessions.reduce((s,x) => s+(x.total||0), 0);
+  const totalC = allSessions.reduce((s,x) => s+(x.correct||0), 0);
+  const acc = totalQ ? Math.round(totalC/totalQ*100) : 0;
+
+  // Активность по дням (последние 14 дней)
+  const days = {};
+  const now = Date.now();
+  for (let i = 13; i >= 0; i--) {
+    const d = new Date(now - i*86400000);
+    const key = d.toISOString().slice(0,10);
+    days[key] = 0;
+  }
+  allSessions.forEach(s => {
+    const key = new Date(s.date).toISOString().slice(0,10);
+    if (key in days) days[key] += (s.total || 0);
+  });
+  const dayKeys = Object.keys(days);
+  const maxDay = Math.max(1, ...Object.values(days));
+
+  // Глобально сложные таблицы
+  const hardest = Object.entries(allFacts)
+    .filter(([, f]) => f.c + f.w >= 5)
+    .sort((a,b) => a[1].c/(a[1].c+a[1].w) - b[1].c/(b[1].c+b[1].w))
+    .slice(0, 6);
+
+  return (
+    <div style={base}>
+      <Header name={profile.name} badge="Администратор" onLogout={onLogout} />
+
+      {loading ? (
+        <div style={{...W, textAlign:"center", padding:24, color:"#9CA3AF"}}>Загрузка…</div>
+      ) : (
+        <>
+          <div style={{...W, display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr", gap:7, marginBottom:18}}>
+            {[
+              ["Игроков", users.length],
+              ["Сессий", totalSessions],
+              ["Вопросов", totalQ],
+              ["Точность", `${acc}%`]
+            ].map(([l,v]) => (
+              <div key={l} style={{background:"#fff", borderRadius:12, padding:"12px 4px", textAlign:"center", border:"1.5px solid #E5E7EB"}}>
+                <div style={{fontSize:10, color:"#6B7280", marginBottom:4}}>{l}</div>
+                <div style={{fontSize:18, fontWeight:800, color:"#1F2937"}}>{v}</div>
               </div>
             ))}
           </div>
-        )}
 
-        {sess.length === 0 && (
-          <div style={{...W, textAlign:"center", padding:"28px 0", color:"#9CA3AF", fontSize:15}}>
-            Пока нет данных. Начните тренировку!
+          <div style={{...W, background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:16, padding:"14px", marginBottom:16}}>
+            <div style={{fontSize:13, fontWeight:700, marginBottom:10, color:"#374151"}}>Активность за 14 дней</div>
+            <div style={{display:"flex", alignItems:"flex-end", gap:3, height:80}}>
+              {dayKeys.map(k => {
+                const v = days[k];
+                const h = Math.max(2, Math.round(v/maxDay*70));
+                return (
+                  <div key={k} style={{flex:1, display:"flex", flexDirection:"column", alignItems:"center", gap:2}}>
+                    <div style={{width:"100%", height:h, background: v ? PU : "#E5E7EB", borderRadius:3, transition:"height 0.3s"}} title={`${k}: ${v} ответов`} />
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{display:"flex", justifyContent:"space-between", fontSize:9, color:"#9CA3AF", marginTop:4}}>
+              <span>{fmtDay(now - 13*86400000)}</span>
+              <span>сегодня</span>
+            </div>
           </div>
-        )}
-      </div>
-    );
-  }
 
-  return null;
+          {hardest.length > 0 && (
+            <div style={{...W, background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:16, padding:"14px", marginBottom:16}}>
+              <div style={{fontSize:13, fontWeight:700, marginBottom:10, color:"#374151"}}>Самые сложные примеры (глобально)</div>
+              <div style={{display:"flex", flexWrap:"wrap", gap:6}}>
+                {hardest.map(([k, f]) => {
+                  const [a,b] = k.split("x");
+                  const p = Math.round(f.c/(f.c+f.w)*100);
+                  return (
+                    <span key={k} style={{padding:"6px 11px", background:"#FEF2F2", color:"#991B1B", borderRadius:9, fontSize:14, fontWeight:600}}>
+                      {a}×{b}={Number(a)*Number(b)} · {p}%
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          <div style={{...W, marginBottom:10, fontSize:13, color:"#6B7280"}}>Все игроки</div>
+          <div style={{...W, display:"flex", flexDirection:"column", gap:7}}>
+            {users.map(u => (
+              <button key={u.uid} onClick={() => openUser(u)}
+                style={{display:"flex", alignItems:"center", justifyContent:"space-between", padding:"12px 14px", background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:12, cursor:"pointer", textAlign:"left"}}>
+                <div>
+                  <div style={{fontSize:15, fontWeight:700, color:"#1F2937"}}>
+                    {u.name} <span style={{fontSize:11, color:"#9CA3AF", fontWeight:400}}>· {u.role}</span>
+                  </div>
+                  <div style={{fontSize:11, color:"#9CA3AF"}}>
+                    {u.lastActive ? `активен ${fmtD(u.lastActive)}` : "нет активности"}
+                    {u.sessionsCount ? ` · ${u.sessionsCount} сессий` : ""}
+                  </div>
+                </div>
+                <div style={{fontSize:18, color:"#9CA3AF"}}>›</div>
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(<App />);
