@@ -252,7 +252,7 @@ async function ensureInviteCode(uid, profile) {
     try {
       const exists = await ref.get();
       if (exists.exists) continue;
-      await ref.set({ childUid: uid, createdAt: Date.now(), used: false });
+      await ref.set({ childUid: uid, childName: profile.name, createdAt: Date.now(), used: false });
       await db.collection("users").doc(uid).update({ inviteCode: code });
       return code;
     } catch(e) {}
@@ -264,16 +264,13 @@ async function linkParentToChildByCode(parentUid, code) {
   const ref = db.collection("inviteCodes").doc(code);
   const snap = await ref.get();
   if (!snap.exists) return { ok: false, error: "Код не найден" };
-  const { childUid } = snap.data();
-  const childDoc = await db.collection("users").doc(childUid).get();
-  if (!childDoc.exists) return { ok: false, error: "Ребёнок не найден" };
-  const childProfile = childDoc.data();
-  if (childProfile.role !== "child") return { ok: false, error: "Это не аккаунт ребёнка" };
+  const { childUid, childName } = snap.data();
+  if (!childUid || !childName) return { ok: false, error: "Код устарел, попроси у ребёнка новый" };
   await db.collection("parentLinks").doc(parentUid).collection("children").doc(childUid).set({
-    name: childProfile.name, linkedAt: Date.now()
+    name: childName, linkedAt: Date.now()
   });
   await ref.update({ used: true, lastLinkedAt: Date.now() });
-  return { ok: true, name: childProfile.name };
+  return { ok: true, name: childName };
 }
 
 // ─── APP ─────────────────────────────────────────────────
