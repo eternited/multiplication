@@ -61,41 +61,75 @@ window._ADMIN_PASS = "admin12345";
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    function isSignedIn() { return request.auth != null; }
+
     function isAdmin() {
-      return isSignedIn()
-        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
-        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
-    }
-    function isParentOf(childUid) {
-      return isSignedIn()
-        && exists(/databases/$(database)/documents/parentLinks/$(request.auth.uid)/children/$(childUid));
+      return request.auth != null &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == "admin";
     }
 
-    match /users/{userId} {
-      allow read, write: if isSignedIn() && (request.auth.uid == userId || isAdmin() || isParentOf(userId));
-      match /facts/{factId} {
-        allow read: if isSignedIn() && (request.auth.uid == userId || isAdmin() || isParentOf(userId));
-        allow write: if isSignedIn() && request.auth.uid == userId;
-      }
-      match /sessions/{sessionId} {
-        allow read: if isSignedIn() && (request.auth.uid == userId || isAdmin() || isParentOf(userId));
-        allow write: if isSignedIn() && request.auth.uid == userId;
-      }
+    match /{document=**} {
+      allow read, write: if isAdmin();
     }
 
-    match /parentLinks/{parentUid}/children/{childUid} {
-      allow read: if isSignedIn() && (request.auth.uid == parentUid || isAdmin());
-      allow write: if isSignedIn() && (request.auth.uid == parentUid || isAdmin());
+    match /users/{uid}/{document=**} {
+      allow read, write: if request.auth != null
+        && request.auth.uid == uid;
+    }
+
+    match /users/{childUid}/{document=**} {
+      allow read: if request.auth != null &&
+        exists(/databases/$(database)/documents/parentLinks/$(request.auth.uid)/children/$(childUid));
     }
 
     match /inviteCodes/{code} {
-      allow read: if isSignedIn();
-      allow write: if isSignedIn();
+      allow read: if request.auth != null;
+      allow write: if request.auth != null;
+    }
+
+    match /parentLinks/{parentUid}/{document=**} {
+      allow read, write: if request.auth != null
+        && request.auth.uid == parentUid;
     }
   }
 }
 */
+
+window._FIRESTORE_RULES = `rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAdmin() {
+      return request.auth != null &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == "admin";
+    }
+
+    match /{document=**} {
+      allow read, write: if isAdmin();
+    }
+
+    match /users/{uid}/{document=**} {
+      allow read, write: if request.auth != null
+        && request.auth.uid == uid;
+    }
+
+    match /users/{childUid}/{document=**} {
+      allow read: if request.auth != null &&
+        exists(/databases/$(database)/documents/parentLinks/$(request.auth.uid)/children/$(childUid));
+    }
+
+    match /inviteCodes/{code} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null;
+    }
+
+    match /parentLinks/{parentUid}/{document=**} {
+      allow read, write: if request.auth != null
+        && request.auth.uid == parentUid;
+    }
+  }
+}`;
+console.log("%c=== FIRESTORE RULES (скопируй в Firebase Console → Firestore → Rules) ===", "color:#534AB7;font-weight:bold");
+console.log(window._FIRESTORE_RULES);
 </script>
 
 <script>
@@ -804,13 +838,14 @@ function ParentApp({ user, profile, onLogout }) {
 
       <div style={{...W, background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:14, padding:"14px", marginBottom:16}}>
         <div style={{fontSize:13, color:"#6B7280", marginBottom:8}}>Привязать ребёнка по коду</div>
-        <div style={{display:"flex", gap:8}}>
-          <input value={code} onChange={e => setCode(e.target.value.replace(/\D/g,"").slice(0,6))}
-            placeholder="6 цифр" inputMode="numeric"
-            style={{flex:1, padding:"12px 14px", borderRadius:12, border:"1.5px solid #D1D5DB", fontSize:18, outline:"none", background:"#fff", letterSpacing:4, textAlign:"center"}} />
-          <button onClick={doLink} style={{padding:"0 18px", borderRadius:12, background:PU, color:"#fff", border:"none", fontWeight:700, cursor:"pointer"}}>OK</button>
-        </div>
-        {linkMsg && <div style={{fontSize:13, color: linkMsg.startsWith("Привязан") ? GR : RD, marginTop:8}}>{linkMsg}</div>}
+        <input value={code} onChange={e => setCode(e.target.value.replace(/\D/g,"").slice(0,6))}
+          placeholder="6 цифр" inputMode="numeric"
+          style={{width:"100%", boxSizing:"border-box", padding:"12px 14px", borderRadius:12, border:"1.5px solid #D1D5DB", fontSize:18, outline:"none", background:"#fff", letterSpacing:4, textAlign:"center", marginBottom:10}} />
+        <button onClick={doLink}
+          style={{width:"100%", height:48, borderRadius:12, background:PU, color:"#fff", border:"none", fontWeight:700, fontSize:16, cursor:"pointer"}}>
+          Привязать
+        </button>
+        {linkMsg && <div style={{fontSize:13, color: linkMsg.startsWith("Привязан") ? GR : RD, marginTop:8, textAlign:"center"}}>{linkMsg}</div>}
       </div>
 
       <div style={{...W, marginBottom:12, fontSize:14, color:"#6B7280"}}>
