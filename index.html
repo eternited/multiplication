@@ -211,6 +211,22 @@ const playSound = (type) => {
       o.start(ctx.currentTime);
       o.stop(ctx.currentTime + 0.38);
       return;
+    } else if (type === "levelup") {
+      // Восходящий арпеджио C-E-G-C — радостный аккорд достижения
+      const notes = [523.25, 659.25, 783.99, 1046.50];
+      notes.forEach((freq, i) => {
+        const o2 = ctx.createOscillator();
+        const g2 = ctx.createGain();
+        o2.connect(g2); g2.connect(ctx.destination);
+        o2.type = "triangle";
+        const t = ctx.currentTime + i * 0.09;
+        o2.frequency.setValueAtTime(freq, t);
+        g2.gain.setValueAtTime(0.22, t);
+        g2.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
+        o2.start(t);
+        o2.stop(t + 0.35);
+      });
+      return;
     }
   } catch(e) {}
 };
@@ -420,6 +436,74 @@ window.playSound = playSound;
     return usable[usable.length - 1];
   }
 
+  // ── Чистый расчёт всех обновлений по итогам сессии ──
+  // profile — текущее состояние профиля (или {} для нового пользователя)
+  // acc — накопленное в памяти за сессию:
+  //   { startDate, startedAt, endedAt, factsDelta, factsFull, sCor, sTot, sXP, maxCombo, sTimes, tables }
+  function computeSessionCommit(profile, acc){
+    const p = profile || {};
+    const completionBonus = sessionBonus(acc.sTot);
+    const sessionXP = (acc.sXP || 0) + completionBonus;
+
+    const prevTotalXP = p.totalXP || 0;
+    const newTotalXP = prevTotalXP + sessionXP;
+    const newTotalCorrect = (p.totalCorrect || 0) + (acc.sCor || 0);
+    const newBest = Math.max(p.bestSessionXP || 0, sessionXP);
+    const newMaxCombo = Math.max(p.maxCombo || 0, acc.maxCombo || 0);
+    const isPerfect = (acc.sTot === 20 && acc.sCor === 20);
+    const newPerfect = (p.perfectSessions || 0) + (isPerfect ? 1 : 0);
+    const daily = updateDailyCorrect(p.dailyCorrect, p.dailyDate, acc.startDate, acc.sCor || 0);
+    const tablesMastered = countTablesMastered(acc.factsFull || {});
+
+    const stats = {
+      maxCombo: newMaxCombo, streakDays: p.streakDays || 1, totalCorrect: newTotalCorrect,
+      totalXP: newTotalXP, perfectSessions: newPerfect, dailyCorrect: daily.dailyCorrect, tablesMastered
+    };
+    const ownedBefore = migrateLegacy(p.achievements);
+    const unlocked = computeUnlockedBadges(stats);
+    const { all, added } = mergeOwned(ownedBefore, unlocked);
+
+    const times = acc.sTimes || [];
+    const avgTime = times.length ? Math.round(times.reduce((a,b)=>a+b,0)/times.length*10)/10 : null;
+    const minTime = times.length ? Math.round(Math.min(...times)*10)/10 : null;
+    const maxTime = times.length ? Math.round(Math.max(...times)*10)/10 : null;
+
+    const session = {
+      date: acc.startedAt,
+      dur: Math.max(0, Math.round(((acc.endedAt || acc.startedAt) - acc.startedAt) / 1000)),
+      correct: acc.sCor || 0, total: acc.sTot || 0,
+      tables: [...(acc.tables || [])],
+      avgTime, minTime, maxTime, xp: sessionXP
+    };
+
+    const profileUpdates = {
+      totalXP: newTotalXP, bestSessionXP: newBest, totalCorrect: newTotalCorrect,
+      maxCombo: newMaxCombo, perfectSessions: newPerfect,
+      dailyCorrect: daily.dailyCorrect, dailyDate: daily.dailyDate,
+      tablesMastered, achievements: all
+    };
+
+    return {
+      session, profileUpdates,
+      factsUpdates: acc.factsDelta || {},
+      sessionXP, completionBonus,
+      newAchievements: added,
+      leveledUp: isLevelUp(prevTotalXP, newTotalXP),
+      newRank: getRank(newTotalXP).cur,
+      newTotalXP,
+    };
+  }
+
+  // Защёлка: первый вызов commit() возвращает true, остальные — false
+  function makeSaveGate(){
+    let saved = false;
+    return {
+      isSaved(){ return saved; },
+      commit(){ if (saved) return false; saved = true; return true; },
+      reset(){ saved = false; }
+    };
+  }
+
   const GAME = {
     NUMS, RANKS, rankIndex, getRank, isLevelUp,
     comboMultiplier, nextCombo, computeAnswerXP, sessionBonus,
@@ -427,6 +511,7 @@ window.playSound = playSound;
     computeUnlockedBadges, migrateLegacy, mergeOwned, visibleChainBadges,
     todayStr, computeStreak, updateDailyCorrect, countTablesMastered,
     wt, pick,
+    computeSessionCommit, makeSaveGate,
   };
   global.GAME = GAME;
   if (typeof module !== "undefined" && module.exports) module.exports = GAME;
@@ -454,7 +539,7 @@ const G = window.GAME;
 const { getRank, isLevelUp, computeAnswerXP, comboMultiplier, nextCombo, sessionBonus,
         CHAIN_ORDER, CHAIN_TITLES, BADGE_BY_ID, computeUnlockedBadges, migrateLegacy,
         mergeOwned, visibleChainBadges, todayStr, computeStreak, updateDailyCorrect,
-        countTablesMastered, pick } = G;
+        countTablesMastered, pick, computeSessionCommit, makeSaveGate } = G;
 
 const hc = f => {
   if (!f || f.c+f.w===0) return {bg:"#E5E7EB", tx:"#9CA3AF"};
@@ -703,10 +788,15 @@ function ChildApp({ user, profile, onLogout }) {
   const [resultData, setResultData] = useState(null);
   const [showLevelUp, setShowLevelUp] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
   const t0 = useRef(null);
   const qTime = useRef(null);
   const sTimes = useRef([]);
   const maxCombo = useRef(0);
+  const factsDeltaRef = useRef({});
+  const saveGateRef = useRef(null);
+  const startDateRef = useRef(null);
+  const commitSessionRef = useRef(null);
 
   useEffect(() => {
     (async () => {
@@ -732,7 +822,7 @@ function ChildApp({ user, profile, onLogout }) {
   }, []);
 
   const R = useRef({});
-  R.current = {ph, ans, fact, sCor, sTot, tbs, ses, facts, combo, sXP, prof, sessions};
+  R.current = {sc, ph, ans, fact, sCor, sTot, tbs, ses, facts, combo, sXP, prof, sessions, saving};
   const sf = useRef(null), pf = useRef(null);
 
   pf.current = d => {
@@ -747,55 +837,74 @@ function ChildApp({ user, profile, onLogout }) {
     setAns(a => a + d);
   };
 
-  const finishSession = (nC, nT, sessionXPBeforeBonus, finalFacts) => {
-    const times = sTimes.current;
-    const avgTime = times.length ? Math.round(times.reduce((a,b)=>a+b,0)/times.length*10)/10 : null;
-    const minTime = times.length ? Math.round(Math.min(...times)*10)/10 : null;
-    const maxTime = times.length ? Math.round(Math.max(...times)*10)/10 : null;
-    const completionBonus = sessionBonus(nT);
-    const sessionXP = sessionXPBeforeBonus + completionBonus;
-    setSXP(sessionXP);
+  // Идемпотентный коммит сессии: одной пачкой пишет facts-дельту, сессию и агрегаты профиля.
+  // Защищён saveGateRef — повторные вызовы (visibilitychange + beforeunload + последний answer) не задвоят данные.
+  commitSessionRef.current = async () => {
+    if (!saveGateRef.current || !saveGateRef.current.commit()) return; // уже сохранили
+    if ((R.current.sTot || 0) === 0) return;
 
-    const s = {date: Date.now(), dur: Math.round((Date.now()-t0.current)/1000), correct: nC, total: nT, tables: [...R.current.tbs], avgTime, minTime, maxTime, xp: sessionXP};
-    db.collection("users").doc(user.uid).collection("sessions").add(s).catch(()=>{});
-
-    const p = R.current.prof || {};
-    const prevTotalXP = p.totalXP || 0;
-    const newTotalXP = prevTotalXP + sessionXP;
-    const newTotalCorrect = (p.totalCorrect || 0) + nC;
-    const newBest = Math.max(p.bestSessionXP || 0, sessionXP);
-    const newMaxCombo = Math.max(p.maxCombo || 0, maxCombo.current);
-    const isPerfect = (nT === 20 && nC === 20);
-    const newPerfect = (p.perfectSessions || 0) + (isPerfect ? 1 : 0);
-    const today = todayStr();
-    const daily = updateDailyCorrect(p.dailyCorrect, p.dailyDate, today, nC);
-    const tablesMastered = countTablesMastered(finalFacts);
-
-    const stats = {
-      maxCombo: newMaxCombo, streakDays: p.streakDays || 1, totalCorrect: newTotalCorrect,
-      totalXP: newTotalXP, perfectSessions: newPerfect, dailyCorrect: daily.dailyCorrect, tablesMastered
+    setSaving(true);
+    const r = R.current;
+    const acc = {
+      startDate: startDateRef.current,
+      startedAt: t0.current,
+      endedAt: Date.now(),
+      factsDelta: {...factsDeltaRef.current},
+      factsFull: r.facts,
+      sCor: r.sCor, sTot: r.sTot, sXP: r.sXP,
+      maxCombo: maxCombo.current,
+      sTimes: [...sTimes.current],
+      tables: r.tbs,
     };
-    const ownedBefore = migrateLegacy(p.achievements);
-    const unlocked = computeUnlockedBadges(stats);
-    const { all, added } = mergeOwned(ownedBefore, unlocked);
+    const result = computeSessionCommit(r.prof, acc);
 
-    const updates = {
-      totalXP: newTotalXP, bestSessionXP: newBest, totalCorrect: newTotalCorrect,
-      maxCombo: newMaxCombo, perfectSessions: newPerfect,
-      dailyCorrect: daily.dailyCorrect, dailyDate: daily.dailyDate,
-      tablesMastered, achievements: all
-    };
-    db.collection("users").doc(user.uid).update(updates).catch(()=>{});
-
-    const leveledUp = isLevelUp(prevTotalXP, newTotalXP);
-    const newRank = getRank(newTotalXP).cur;
-
-    setProf({...p, ...updates});
-    setSessions(prev => [s, ...prev].slice(0, 50));
-    setResultData({ sessionXP, completionBonus, newAch: added, totalXP: newTotalXP, levelUp: leveledUp, newRank });
-    setShowLevelUp(leveledUp);
+    // Оптимистичный UI: переключаемся на результаты сразу
+    setProf(prev => ({...(prev || {}), ...result.profileUpdates}));
+    setSessions(prev => [result.session, ...prev].slice(0, 50));
+    setResultData({
+      sessionXP: result.sessionXP, completionBonus: result.completionBonus,
+      newAch: result.newAchievements, totalXP: result.newTotalXP,
+      levelUp: result.leveledUp, newRank: result.newRank,
+    });
+    setShowLevelUp(result.leveledUp);
     setSc("results");
+
+    // Фоновая запись одним батчем
+    try {
+      const userRef = db.collection("users").doc(user.uid);
+      const batch = db.batch();
+      for (const [k, v] of Object.entries(acc.factsDelta)) {
+        batch.set(userRef.collection("facts").doc(k), v);
+      }
+      batch.set(userRef.collection("sessions").doc(), result.session);
+      batch.update(userRef, result.profileUpdates);
+      await batch.commit();
+    } catch (e) {
+      console.error("Не удалось сохранить сессию:", e);
+    } finally {
+      setSaving(false);
+    }
   };
+
+  // Сейф-нет: сохранение при сворачивании вкладки / закрытии страницы.
+  // Сохраняем только если сессия идёт, есть >0 ответов и ещё не сохраняли.
+  useEffect(() => {
+    const flush = () => {
+      const r = R.current;
+      if (r.sc === "train" && (r.sTot || 0) > 0 && saveGateRef.current && !saveGateRef.current.isSaved()) {
+        commitSessionRef.current && commitSessionRef.current();
+      }
+    };
+    const onVis = () => { if (document.hidden) flush(); };
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("pagehide", flush);
+    window.addEventListener("beforeunload", flush);
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("pagehide", flush);
+      window.removeEventListener("beforeunload", flush);
+    };
+  }, []);
 
   sf.current = () => {
     const {ph, ans, fact, sCor, sTot, tbs, ses, facts, combo, sXP} = R.current;
@@ -808,7 +917,8 @@ function ChildApp({ user, profile, onLogout }) {
     const nf = {c: o.c+(ok?1:0), w: o.w+(ok?0:1), t: Date.now()};
     const updatedFacts = {...facts, [fact.k]: nf};
     setFacts(updatedFacts);
-    db.collection("users").doc(user.uid).collection("facts").doc(fact.k).set(nf).catch(()=>{});
+    // Накапливаем дельту в памяти, в Firestore запишем одной пачкой в конце сессии.
+    factsDeltaRef.current[fact.k] = nf;
 
     // Начисление XP и комбо
     const fast = elapsedMs < 3000;
@@ -824,7 +934,7 @@ function ChildApp({ user, profile, onLogout }) {
     setSTot(nT); setSCor(nC); setPh(ok ? "ok" : "err");
     setTimeout(() => {
       if (nT >= ses) {
-        finishSession(nC, nT, newSXP, updatedFacts);
+        commitSessionRef.current && commitSessionRef.current();
       } else {
         setFact(pick(tbs, updatedFacts, fact)); setAns(""); setPh("q");
         qTime.current = Date.now();
@@ -845,9 +955,13 @@ function ChildApp({ user, profile, onLogout }) {
 
   const startTrain = () => {
     if (!tbs.length) return;
+    if (saving) return; // защита от гонки: не стартуем новую сессию, пока пишем предыдущую
     t0.current = Date.now();
+    startDateRef.current = todayStr(); // календарный день фиксируем по моменту старта
     sTimes.current = [];
     maxCombo.current = 0;
+    factsDeltaRef.current = {};
+    saveGateRef.current = makeSaveGate();
     setSCor(0); setSTot(0);
     setSXP(0); setCombo(0); setXpPop(null); setResultData(null); setShowLevelUp(false);
     setFact(pick(tbs, facts));
@@ -927,9 +1041,9 @@ function ChildApp({ user, profile, onLogout }) {
         </div>
       </div>
 
-      <button onClick={startTrain}
-        style={{...W, height:56, borderRadius:16, background: tbs.length ? PU : "#9CA3AF", color:"#fff", fontSize:18, fontWeight:700, border:"none", cursor:"pointer", marginBottom:12}}>
-        Начать тренировку ▶
+      <button onClick={startTrain} disabled={!tbs.length || saving}
+        style={{...W, height:56, borderRadius:16, background: (tbs.length && !saving) ? PU : "#9CA3AF", color:"#fff", fontSize:18, fontWeight:700, border:"none", cursor: saving ? "default" : "pointer", marginBottom:12}}>
+        {saving ? "Сохранение…" : "Начать тренировку ▶"}
       </button>
       <button onClick={() => setSc("achievements")}
         style={{...W, height:50, borderRadius:14, background:"#fff", color:PU, fontSize:16, fontWeight:700, border:`2px solid ${PL}`, cursor:"pointer"}}>
@@ -1131,7 +1245,7 @@ function ChildApp({ user, profile, onLogout }) {
               <div style={{fontSize:96, marginBottom:10, animation:"celebPop 0.6s ease-out"}}>{resultData.newRank.emoji}</div>
               <div style={{fontSize:13, opacity:0.85, marginBottom:4}}>Новое звание</div>
               <div style={{fontSize:30, fontWeight:800, marginBottom:28}}>{resultData.newRank.name}!</div>
-              <button onClick={() => setShowLevelUp(false)}
+              <button onClick={() => { window.playSound("levelup"); setShowLevelUp(false); }}
                 style={{width:"100%", height:54, borderRadius:16, border:"none", cursor:"pointer", fontSize:18, fontWeight:800,
                   color:"#2E2A5E", background:"linear-gradient(90deg,#FCD34D,#FBBF24)", animation:"glowPulse 1.6s ease-in-out infinite"}}>
                 Класс! 🚀
@@ -1202,9 +1316,9 @@ function ChildApp({ user, profile, onLogout }) {
           </div>
         )}
 
-        <button onClick={startTrain}
-          style={{...W, height:56, borderRadius:16, background:PU, color:"#fff", fontSize:18, fontWeight:700, border:"none", cursor:"pointer", marginBottom:12}}>
-          Тренироваться снова ▶
+        <button onClick={startTrain} disabled={saving}
+          style={{...W, height:56, borderRadius:16, background: saving ? "#9CA3AF" : PU, color:"#fff", fontSize:18, fontWeight:700, border:"none", cursor: saving ? "default" : "pointer", marginBottom:12}}>
+          {saving ? "Сохранение…" : "Тренироваться снова ▶"}
         </button>
         <button onClick={() => setSc("home")}
           style={{...W, height:46, borderRadius:13, background:"transparent", color:"#6B7280", fontSize:15, border:"1.5px solid #D1D5DB", cursor:"pointer"}}>
