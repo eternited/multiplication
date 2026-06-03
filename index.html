@@ -34,6 +34,19 @@
     60%  { transform: scale(1.12); }
     100% { transform: scale(1); opacity: 1; }
   }
+  @keyframes confettiFall {
+    0%   { transform: translateY(-30px) rotate(0deg); opacity: 1; }
+    100% { transform: translateY(360px) rotate(380deg); opacity: 0; }
+  }
+  @keyframes celebPop {
+    0%   { transform: scale(0.4) rotate(-8deg); opacity: 0; }
+    55%  { transform: scale(1.18) rotate(4deg); }
+    100% { transform: scale(1) rotate(0deg); opacity: 1; }
+  }
+  @keyframes glowPulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(251,191,36,0.55); }
+    50%      { box-shadow: 0 0 28px 8px rgba(251,191,36,0.35); }
+  }
 </style>
 </head>
 <body>
@@ -205,6 +218,222 @@ const playSound = (type) => {
 window.playSound = playSound;
 </script>
 
+<script id="game-logic">
+// ─── ЧИСТАЯ ИГРОВАЯ ЛОГИКА (тестируется в Node, см. автотесты) ───
+(function(global){
+  const NUMS = [2,3,4,5,6,7,8,9,10];
+
+  // ── Звания (прогрессирующие пороги) ──
+  const RANKS = [
+    {min: 0,      emoji: "🌱", name: "Новичок"},
+    {min: 500,    emoji: "🛸", name: "Пилот"},
+    {min: 1500,   emoji: "⭐", name: "Штурман"},
+    {min: 4000,   emoji: "🚀", name: "Капитан"},
+    {min: 9000,   emoji: "🌟", name: "Командир"},
+    {min: 20000,  emoji: "🪐", name: "Адмирал галактики"},
+    {min: 40000,  emoji: "☄️", name: "Легенда галактики"},
+  ];
+
+  function rankIndex(xp){
+    xp = xp || 0;
+    let idx = 0;
+    for (let i = 0; i < RANKS.length; i++) if (xp >= RANKS[i].min) idx = i;
+    return idx;
+  }
+  function getRank(xp){
+    xp = xp || 0;
+    const index = rankIndex(xp);
+    const cur = RANKS[index];
+    const next = RANKS[index + 1] || null;
+    const into = xp - cur.min;
+    const span = next ? next.min - cur.min : 1;
+    const pct = next ? Math.min(100, Math.round(into / span * 100)) : 100;
+    return { cur, next, into, span, pct, index };
+  }
+  // Повышение звания: индекс вырос
+  function isLevelUp(oldXP, newXP){ return rankIndex(newXP) > rankIndex(oldXP); }
+
+  // ── XP / комбо ──
+  function comboMultiplier(comboAfter){ return comboAfter >= 10 ? 3 : comboAfter >= 5 ? 2 : 1; }
+  function nextCombo(prevCombo, correct){ return correct ? (prevCombo || 0) + 1 : 0; }
+  // Очки за один ответ: correct — верно ли, fast — быстрее 3с, comboAfter — комбо ПОСЛЕ этого ответа
+  function computeAnswerXP(correct, fast, comboAfter){
+    if (!correct) return 0;
+    const base = fast ? 15 : 10;
+    return base * comboMultiplier(comboAfter);
+  }
+  // Бонус за полную сессию из 20 вопросов
+  function sessionBonus(total){ return total === 20 ? 50 : 0; }
+
+  // ── Цепочки бейджей ──
+  const CHAINS = {
+    combo:        [10, 20, 30, 50, 100],
+    daystreak:    [3, 5, 10, 20, 30, 50, 100],
+    totalcorrect: [100, 250, 500, 1000, 2500, 5000],
+    totalxp:      [1000, 5000, 10000, 25000, 50000, 100000],
+    perfect:      [1, 5, 10, 25, 50],
+    dailycorrect: [20, 50, 100, 200],
+    tables:       [1, 3, 6, 9],
+  };
+  const CHAIN_ORDER = ["combo","daystreak","totalcorrect","totalxp","perfect","dailycorrect","tables"];
+  const CHAIN_TITLES = {
+    combo: "Серии без ошибок",
+    daystreak: "Дни подряд",
+    totalcorrect: "Верные ответы",
+    totalxp: "Опыт",
+    perfect: "Идеальные сессии",
+    dailycorrect: "Рекорд за день",
+    tables: "Освоение таблиц",
+  };
+  // Эмодзи и названия для каждого порога цепочки
+  const BADGE_META = {
+    combo:        {emojis:["🔥","⚡","💥","🌟","☄️"],       label: n => `Серия ${n}`,    desc: n => `${n} правильных подряд`},
+    daystreak:    {emojis:["📅","🗓️","🔆","🌈","🏅","👑","💎"], label: n => `${n} дней подряд`, desc: n => `Заходил ${n} дней подряд`},
+    totalcorrect: {emojis:["💯","🎯","🏆","🥇","🌠","🪐"],  label: n => `${n} верных`,   desc: n => `${n} правильных ответов всего`},
+    totalxp:      {emojis:["⭐","🌟","✨","🚀","🛸","🌌"],   label: n => `${n} очков`,    desc: n => `${n} XP за всё время`},
+    perfect:      {emojis:["🎖️","🏵️","🏆","👑","💎"],       label: n => n === 1 ? "Идеальная сессия" : `${n} идеальных`, desc: n => n === 1 ? "Сессия 20 из 20" : `${n} сессий по 20 из 20`},
+    dailycorrect: {emojis:["☀️","🌞","🔥","🚀"],            label: n => `${n} за день`,  desc: n => `${n} верных за один день`},
+    tables:       {emojis:["🎯","📚","🧠","🎓"],            label: n => n === 1 ? "Первая таблица" : n === 9 ? "Все таблицы" : `${n} таблицы`, desc: n => `Освоено таблиц на 90%+: ${n}`},
+  };
+
+  // Полный список бейджей
+  const BADGES = [];
+  for (const chain of CHAIN_ORDER){
+    CHAINS[chain].forEach((threshold, i) => {
+      const meta = BADGE_META[chain];
+      BADGES.push({
+        id: `${chain}_${threshold}`,
+        chain, threshold,
+        emoji: meta.emojis[i] || meta.emojis[meta.emojis.length - 1],
+        name: meta.label(threshold),
+        desc: meta.desc(threshold),
+      });
+    });
+  }
+  const BADGE_BY_ID = Object.fromEntries(BADGES.map(b => [b.id, b]));
+
+  // Соответствие stat → значение из stats
+  const CHAIN_STAT = {
+    combo: "maxCombo",
+    daystreak: "streakDays",
+    totalcorrect: "totalCorrect",
+    totalxp: "totalXP",
+    perfect: "perfectSessions",
+    dailycorrect: "dailyCorrect",
+    tables: "tablesMastered",
+  };
+
+  // Какие бейджи должны быть открыты при данной статистике
+  function computeUnlockedBadges(stats){
+    const out = [];
+    for (const chain of CHAIN_ORDER){
+      const val = stats[CHAIN_STAT[chain]] || 0;
+      for (const threshold of CHAINS[chain]){
+        if (val >= threshold) out.push(`${chain}_${threshold}`);
+      }
+    }
+    return out;
+  }
+
+  // Миграция старых достижений в систему цепочек
+  const LEGACY_MAP = {
+    combo10: "combo_10",
+    correct100: "totalcorrect_100",
+    master_table: "tables_1",
+    streak3: "daystreak_3",
+    perfect_session: "perfect_1",
+  };
+  function migrateLegacy(achievements){
+    const out = new Set();
+    for (const id of (achievements || [])){
+      if (LEGACY_MAP[id]) out.add(LEGACY_MAP[id]);
+      else if (BADGE_BY_ID[id]) out.add(id);
+      // first_session и прочие неизвестные id отбрасываются (нет цепочки)
+    }
+    return [...out];
+  }
+
+  // Объединить владение без дубликатов; вернуть {all, added}
+  function mergeOwned(existingMigrated, unlocked){
+    const have = new Set(existingMigrated);
+    const added = [];
+    for (const id of unlocked){ if (!have.has(id)){ have.add(id); added.push(id); } }
+    return { all: [...have], added };
+  }
+
+  // Видимые бейджи цепочки: все полученные + первый неполученный (замок). Остальные скрыты.
+  function visibleChainBadges(chain, ownedSet){
+    const list = CHAINS[chain].map(t => BADGE_BY_ID[`${chain}_${t}`]);
+    const out = [];
+    let lockedShown = false;
+    for (const b of list){
+      if (ownedSet.has(b.id)){ out.push({...b, owned: true}); }
+      else if (!lockedShown){ out.push({...b, owned: false}); lockedShown = true; }
+      else break; // всё после первого замка скрываем
+    }
+    return out;
+  }
+
+  // ── Серия дней ──
+  function todayStr(){ return new Date().toISOString().slice(0, 10); }
+  function computeStreak(lastActiveDate, prevStreak, today){
+    today = today || todayStr();
+    if (lastActiveDate === today) return prevStreak || 1;
+    const t = new Date(today + "T00:00:00Z");
+    const yesterday = new Date(t.getTime() - 86400000).toISOString().slice(0, 10);
+    if (lastActiveDate === yesterday) return (prevStreak || 0) + 1;
+    return 1;
+  }
+
+  // ── Верных за календарный день (сброс при новом дне) ──
+  function updateDailyCorrect(prevCount, prevDate, today, addCorrect){
+    today = today || todayStr();
+    if (prevDate === today) return { dailyCorrect: (prevCount || 0) + addCorrect, dailyDate: today };
+    return { dailyCorrect: addCorrect, dailyDate: today };
+  }
+
+  // ── Освоенные таблицы (все 9 примеров пройдены, точность ≥ 90%) ──
+  function countTablesMastered(facts){
+    let count = 0;
+    for (const a of NUMS){
+      let c = 0, w = 0, attempted = 0;
+      for (const b of NUMS){
+        const f = (facts || {})[`${a}x${b}`];
+        if (f && f.c + f.w > 0){ c += f.c; w += f.w; attempted++; }
+      }
+      if (attempted === NUMS.length && c + w > 0 && c / (c + w) >= 0.9) count++;
+    }
+    return count;
+  }
+
+  // ── Выбор примера (адаптивный вес, без повтора подряд) ──
+  function wt(f){ return !f || f.c + f.w === 0 ? 0.65 : Math.max(0.1, 1 - f.c / (f.c + f.w + 0.5)); }
+  function pick(tbs, facts, lastFact, rng){
+    rng = rng || Math.random;
+    const pool = tbs.flatMap(a => NUMS.map(b => ({a, b, k:`${a}x${b}`})));
+    const filtered = lastFact ? pool.filter(p => p.k !== lastFact.k) : pool;
+    const usable = filtered.length > 0 ? filtered : pool;
+    const ws = usable.map(p => wt(facts[p.k]));
+    const sum = ws.reduce((s, w) => s + w, 0);
+    let r = rng() * sum;
+    for (let i = 0; i < usable.length; i++){ r -= ws[i]; if (r <= 0) return usable[i]; }
+    return usable[usable.length - 1];
+  }
+
+  const GAME = {
+    NUMS, RANKS, rankIndex, getRank, isLevelUp,
+    comboMultiplier, nextCombo, computeAnswerXP, sessionBonus,
+    CHAINS, CHAIN_ORDER, CHAIN_TITLES, BADGES, BADGE_BY_ID,
+    computeUnlockedBadges, migrateLegacy, mergeOwned, visibleChainBadges,
+    todayStr, computeStreak, updateDailyCorrect, countTablesMastered,
+    wt, pick,
+  };
+  global.GAME = GAME;
+  if (typeof module !== "undefined" && module.exports) module.exports = GAME;
+})(typeof window !== "undefined" ? window : globalThis);
+</script>
+
+
 <script type="text/babel">
 const { useState, useEffect, useRef, useMemo } = React;
 
@@ -221,17 +450,11 @@ const PU = "#534AB7", PL = "#EEEDFE", GR = "#16A34A", RD = "#DC2626";
 const nameToEmail = (n) => n.trim().toLowerCase().replace(/\s+/g, "_") + "@multiplication.app";
 const gen6 = () => String(Math.floor(100000 + Math.random() * 900000));
 
-const wt = f => !f || f.c+f.w===0 ? 0.65 : Math.max(0.1, 1 - f.c/(f.c+f.w+0.5));
-const pick = (tbs, facts, lastFact) => {
-  const pool = tbs.flatMap(a => NUMS.map(b => ({a, b, k:`${a}x${b}`})));
-  const filtered = lastFact ? pool.filter(p => p.k !== lastFact.k) : pool;
-  const usable = filtered.length > 0 ? filtered : pool;
-  const ws = usable.map(p => wt(facts[p.k]));
-  const sum = ws.reduce((s,w) => s+w, 0);
-  let r = Math.random() * sum;
-  for (let i=0; i<usable.length; i++) { r -= ws[i]; if (r<=0) return usable[i]; }
-  return usable[usable.length-1];
-};
+const G = window.GAME;
+const { getRank, isLevelUp, computeAnswerXP, comboMultiplier, nextCombo, sessionBonus,
+        CHAIN_ORDER, CHAIN_TITLES, BADGE_BY_ID, computeUnlockedBadges, migrateLegacy,
+        mergeOwned, visibleChainBadges, todayStr, computeStreak, updateDailyCorrect,
+        countTablesMastered, pick } = G;
 
 const hc = f => {
   if (!f || f.c+f.w===0) return {bg:"#E5E7EB", tx:"#9CA3AF"};
@@ -245,73 +468,6 @@ const hc = f => {
 const fmtD = ts => new Date(ts).toLocaleDateString("ru-RU", {day:"numeric", month:"short", hour:"2-digit", minute:"2-digit"});
 const fmtDay = ts => new Date(ts).toLocaleDateString("ru-RU", {day:"numeric", month:"short"});
 const fmtS = s => s < 60 ? `${s}с` : `${Math.floor(s/60)}м ${s%60}с`;
-
-// ─── GAMIFICATION ────────────────────────────────────────
-const RANKS = [
-  {min: 0,     emoji: "🌱", name: "Новичок"},
-  {min: 500,   emoji: "🛸", name: "Пилот"},
-  {min: 1500,  emoji: "⭐", name: "Штурман"},
-  {min: 3500,  emoji: "🚀", name: "Капитан"},
-  {min: 7000,  emoji: "🌟", name: "Командир"},
-  {min: 15000, emoji: "🪐", name: "Адмирал галактики"},
-];
-
-const getRank = (xp) => {
-  xp = xp || 0;
-  let cur = RANKS[0], next = null;
-  for (let i = 0; i < RANKS.length; i++) {
-    if (xp >= RANKS[i].min) { cur = RANKS[i]; next = RANKS[i+1] || null; }
-  }
-  const into = xp - cur.min;
-  const span = next ? next.min - cur.min : 1;
-  const pct = next ? Math.min(100, Math.round(into / span * 100)) : 100;
-  return { cur, next, into, span, pct };
-};
-
-const ACHIEVEMENTS = [
-  {id: "first_session",   emoji: "🔥", name: "Первый полёт",     desc: "Завершил первую сессию"},
-  {id: "combo10",         emoji: "⚡", name: "Серия из 10",      desc: "10 правильных подряд"},
-  {id: "correct100",      emoji: "💯", name: "Сотня",            desc: "100 правильных ответов"},
-  {id: "master_table",    emoji: "🎯", name: "Мастер таблицы",   desc: "Таблица освоена на 90%+"},
-  {id: "streak3",         emoji: "📅", name: "Три дня подряд",   desc: "Заходил 3 дня подряд"},
-  {id: "perfect_session", emoji: "🏆", name: "Идеальная сессия", desc: "20 из 20 правильных"},
-];
-const ACH_BY_ID = Object.fromEntries(ACHIEVEMENTS.map(a => [a.id, a]));
-
-const todayStr = () => new Date().toISOString().slice(0, 10);
-const computeStreak = (lastActiveDate, prevStreak) => {
-  const today = todayStr();
-  if (lastActiveDate === today) return prevStreak || 1;
-  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-  if (lastActiveDate === yesterday) return (prevStreak || 0) + 1;
-  return 1;
-};
-
-// Любая таблица освоена на 90%+ (все 9 примеров пройдены, общая точность ≥ 90%)
-const anyTableMastered = (facts) => {
-  for (const a of NUMS) {
-    let c = 0, w = 0, attempted = 0;
-    for (const b of NUMS) {
-      const f = facts[`${a}x${b}`];
-      if (f && f.c + f.w > 0) { c += f.c; w += f.w; attempted++; }
-    }
-    if (attempted === NUMS.length && c + w > 0 && c / (c + w) >= 0.9) return true;
-  }
-  return false;
-};
-
-const checkAchievements = (existing, ctx) => {
-  const have = new Set(existing || []);
-  const added = [];
-  const give = id => { if (!have.has(id)) { have.add(id); added.push(id); } };
-  if (ctx.totalSessions >= 1) give("first_session");
-  if (ctx.maxCombo >= 10) give("combo10");
-  if (ctx.totalCorrect >= 100) give("correct100");
-  if (anyTableMastered(ctx.facts)) give("master_table");
-  if (ctx.streakDays >= 3) give("streak3");
-  if (ctx.nT === 20 && ctx.nC === 20) give("perfect_session");
-  return { all: [...have], added };
-};
 
 // ─── FIRESTORE I/O ───────────────────────────────────────
 async function loadUserData(uid) {
@@ -545,6 +701,7 @@ function ChildApp({ user, profile, onLogout }) {
   const [combo, setCombo] = useState(0);
   const [xpPop, setXpPop] = useState(null);
   const [resultData, setResultData] = useState(null);
+  const [showLevelUp, setShowLevelUp] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const t0 = useRef(null);
   const qTime = useRef(null);
@@ -595,7 +752,7 @@ function ChildApp({ user, profile, onLogout }) {
     const avgTime = times.length ? Math.round(times.reduce((a,b)=>a+b,0)/times.length*10)/10 : null;
     const minTime = times.length ? Math.round(Math.min(...times)*10)/10 : null;
     const maxTime = times.length ? Math.round(Math.max(...times)*10)/10 : null;
-    const completionBonus = nT === 20 ? 50 : 0;
+    const completionBonus = sessionBonus(nT);
     const sessionXP = sessionXPBeforeBonus + completionBonus;
     setSXP(sessionXP);
 
@@ -603,21 +760,40 @@ function ChildApp({ user, profile, onLogout }) {
     db.collection("users").doc(user.uid).collection("sessions").add(s).catch(()=>{});
 
     const p = R.current.prof || {};
-    const newTotalXP = (p.totalXP || 0) + sessionXP;
+    const prevTotalXP = p.totalXP || 0;
+    const newTotalXP = prevTotalXP + sessionXP;
     const newTotalCorrect = (p.totalCorrect || 0) + nC;
     const newBest = Math.max(p.bestSessionXP || 0, sessionXP);
-    const totalSessions = (R.current.sessions || []).length + 1;
-    const { all, added } = checkAchievements(p.achievements, {
-      totalSessions, maxCombo: maxCombo.current, totalCorrect: newTotalCorrect,
-      facts: finalFacts, streakDays: p.streakDays || 1, nC, nT
-    });
+    const newMaxCombo = Math.max(p.maxCombo || 0, maxCombo.current);
+    const isPerfect = (nT === 20 && nC === 20);
+    const newPerfect = (p.perfectSessions || 0) + (isPerfect ? 1 : 0);
+    const today = todayStr();
+    const daily = updateDailyCorrect(p.dailyCorrect, p.dailyDate, today, nC);
+    const tablesMastered = countTablesMastered(finalFacts);
 
-    const updates = { totalXP: newTotalXP, bestSessionXP: newBest, totalCorrect: newTotalCorrect, achievements: all };
+    const stats = {
+      maxCombo: newMaxCombo, streakDays: p.streakDays || 1, totalCorrect: newTotalCorrect,
+      totalXP: newTotalXP, perfectSessions: newPerfect, dailyCorrect: daily.dailyCorrect, tablesMastered
+    };
+    const ownedBefore = migrateLegacy(p.achievements);
+    const unlocked = computeUnlockedBadges(stats);
+    const { all, added } = mergeOwned(ownedBefore, unlocked);
+
+    const updates = {
+      totalXP: newTotalXP, bestSessionXP: newBest, totalCorrect: newTotalCorrect,
+      maxCombo: newMaxCombo, perfectSessions: newPerfect,
+      dailyCorrect: daily.dailyCorrect, dailyDate: daily.dailyDate,
+      tablesMastered, achievements: all
+    };
     db.collection("users").doc(user.uid).update(updates).catch(()=>{});
+
+    const leveledUp = isLevelUp(prevTotalXP, newTotalXP);
+    const newRank = getRank(newTotalXP).cur;
 
     setProf({...p, ...updates});
     setSessions(prev => [s, ...prev].slice(0, 50));
-    setResultData({ sessionXP, completionBonus, newAch: added, totalXP: newTotalXP });
+    setResultData({ sessionXP, completionBonus, newAch: added, totalXP: newTotalXP, levelUp: leveledUp, newRank });
+    setShowLevelUp(leveledUp);
     setSc("results");
   };
 
@@ -635,21 +811,14 @@ function ChildApp({ user, profile, onLogout }) {
     db.collection("users").doc(user.uid).collection("facts").doc(fact.k).set(nf).catch(()=>{});
 
     // Начисление XP и комбо
-    let gained = 0, newCombo = combo;
     const fast = elapsedMs < 3000;
-    if (ok) {
-      newCombo = combo + 1;
-      const base = fast ? 15 : 10;
-      const mult = newCombo >= 10 ? 3 : newCombo >= 5 ? 2 : 1;
-      gained = base * mult;
-    } else {
-      newCombo = 0;
-    }
+    const newCombo = nextCombo(combo, ok);
+    const gained = computeAnswerXP(ok, fast, newCombo);
     setCombo(newCombo);
     maxCombo.current = Math.max(maxCombo.current, newCombo);
     const newSXP = sXP + gained;
     setSXP(newSXP);
-    if (gained > 0) setXpPop({ amount: gained, fast, mult: newCombo >= 10 ? 3 : newCombo >= 5 ? 2 : 1, key: Date.now() });
+    if (gained > 0) setXpPop({ amount: gained, fast, mult: comboMultiplier(newCombo), key: Date.now() });
 
     const nT = sTot+1, nC = sCor+(ok?1:0);
     setSTot(nT); setSCor(nC); setPh(ok ? "ok" : "err");
@@ -680,7 +849,7 @@ function ChildApp({ user, profile, onLogout }) {
     sTimes.current = [];
     maxCombo.current = 0;
     setSCor(0); setSTot(0);
-    setSXP(0); setCombo(0); setXpPop(null); setResultData(null);
+    setSXP(0); setCombo(0); setXpPop(null); setResultData(null); setShowLevelUp(false);
     setFact(pick(tbs, facts));
     setAns(""); setPh("q"); setSc("train");
     qTime.current = Date.now();
@@ -773,7 +942,7 @@ function ChildApp({ user, profile, onLogout }) {
   // ── ACHIEVEMENTS ───────────────────────────────────────
   if (sc === "achievements") {
     const rk = getRank(prof.totalXP);
-    const owned = new Set(prof.achievements || []);
+    const owned = new Set(migrateLegacy(prof.achievements));
     return (
       <div style={base}>
         <div style={{...W, display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:18}}>
@@ -806,31 +975,37 @@ function ChildApp({ user, profile, onLogout }) {
           ))}
         </div>
 
-        <div style={{...W, fontSize:13, color:"#6B7280", marginBottom:10}}>
-          Значки ({owned.size} / {ACHIEVEMENTS.length})
+        <div style={{...W, fontSize:13, color:"#6B7280", marginBottom:14}}>
+          Значки ({owned.size} получено)
         </div>
-        <div style={{...W, display:"grid", gridTemplateColumns:"1fr 1fr", gap:10}}>
-          {ACHIEVEMENTS.map(a => {
-            const got = owned.has(a.id);
-            return (
-              <div key={a.id} style={{padding:"16px 12px", borderRadius:16, textAlign:"center",
-                background: got ? "#fff" : "#F3F4F6",
-                border: got ? `2px solid ${PL}` : "1.5px solid #E5E7EB",
-                boxShadow: got ? "0 3px 10px rgba(83,74,183,0.12)" : "none",
-                opacity: got ? 1 : 0.85}}>
-                <div style={{fontSize:34, marginBottom:6, filter: got ? "none" : "grayscale(1)"}}>
-                  {got ? a.emoji : "🔒"}
-                </div>
-                <div style={{fontSize:14, fontWeight:700, color: got ? "#1F2937" : "#9CA3AF", marginBottom:3}}>
-                  {got ? a.name : "Закрыто"}
-                </div>
-                <div style={{fontSize:11, color: got ? "#6B7280" : "#BCC0C7"}}>
-                  {a.desc}
-                </div>
+
+        {CHAIN_ORDER.map(chain => {
+          const badges = visibleChainBadges(chain, owned);
+          if (!badges.length) return null;
+          return (
+            <div key={chain} style={{...W, marginBottom:20}}>
+              <div style={{fontSize:14, fontWeight:700, color:"#374151", marginBottom:10}}>{CHAIN_TITLES[chain]}</div>
+              <div style={{display:"flex", flexWrap:"wrap", gap:10}}>
+                {badges.map(b => (
+                  <div key={b.id} style={{flex:"1 1 0", minWidth:96, maxWidth:140, padding:"14px 10px", borderRadius:16, textAlign:"center",
+                    background: b.owned ? "#fff" : "#F3F4F6",
+                    border: b.owned ? `2px solid ${PL}` : "1.5px dashed #D1D5DB",
+                    boxShadow: b.owned ? "0 3px 10px rgba(83,74,183,0.12)" : "none"}}>
+                    <div style={{fontSize:30, marginBottom:5, filter: b.owned ? "none" : "grayscale(1)", opacity: b.owned ? 1 : 0.55}}>
+                      {b.owned ? b.emoji : "🔒"}
+                    </div>
+                    <div style={{fontSize:13, fontWeight:700, color: b.owned ? "#1F2937" : "#9CA3AF", marginBottom:2}}>
+                      {b.name}
+                    </div>
+                    <div style={{fontSize:10, color: b.owned ? "#6B7280" : "#A8AEB8"}}>
+                      {b.desc}
+                    </div>
+                  </div>
+                ))}
               </div>
-            );
-          })}
-        </div>
+            </div>
+          );
+        })}
 
         <button onClick={() => setSc("home")}
           style={{...W, height:52, borderRadius:14, background:PU, color:"#fff", fontSize:16, fontWeight:700, border:"none", cursor:"pointer", marginTop:20}}>
@@ -937,6 +1112,34 @@ function ChildApp({ user, profile, onLogout }) {
       .sort((a, b) => a[1].c/(a[1].c+a[1].w) - b[1].c/(b[1].c+b[1].w)).slice(0, 6);
     return (
       <div style={base}>
+        {showLevelUp && resultData && resultData.newRank && (
+          <div onClick={() => setShowLevelUp(false)}
+            style={{position:"fixed", inset:0, zIndex:200, display:"flex", alignItems:"center", justifyContent:"center", padding:20, overflow:"hidden",
+              background:"radial-gradient(circle at 50% 40%, #3B3680 0%, #1B1840 70%, #11101F 100%)"}}>
+            {Array.from({length: 16}).map((_, i) => {
+              const left = (i * 6.3 + (i % 3) * 4) % 100;
+              const delay = (i % 8) * 0.18;
+              const dur = 1.6 + (i % 5) * 0.25;
+              const emoji = ["⭐","✨","🌟","🎉","💫","🪐"][i % 6];
+              return (
+                <span key={i} style={{position:"absolute", top:0, left:`${left}%`, fontSize: 16 + (i % 4) * 6,
+                  animation:`confettiFall ${dur}s linear ${delay}s infinite`, pointerEvents:"none"}}>{emoji}</span>
+              );
+            })}
+            <div onClick={e => e.stopPropagation()} style={{position:"relative", textAlign:"center", color:"#fff", maxWidth:340, width:"100%"}}>
+              <div style={{fontSize:15, fontWeight:700, letterSpacing:2, opacity:0.85, marginBottom:10, textTransform:"uppercase"}}>Новый уровень!</div>
+              <div style={{fontSize:96, marginBottom:10, animation:"celebPop 0.6s ease-out"}}>{resultData.newRank.emoji}</div>
+              <div style={{fontSize:13, opacity:0.85, marginBottom:4}}>Новое звание</div>
+              <div style={{fontSize:30, fontWeight:800, marginBottom:28}}>{resultData.newRank.name}!</div>
+              <button onClick={() => setShowLevelUp(false)}
+                style={{width:"100%", height:54, borderRadius:16, border:"none", cursor:"pointer", fontSize:18, fontWeight:800,
+                  color:"#2E2A5E", background:"linear-gradient(90deg,#FCD34D,#FBBF24)", animation:"glowPulse 1.6s ease-in-out infinite"}}>
+                Класс! 🚀
+              </button>
+            </div>
+          </div>
+        )}
+
         <div style={{...W, background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:22, padding:"34px 22px", marginBottom:14, textAlign:"center"}}>
           <div style={{fontSize:44, color:"#F59E0B", letterSpacing:7, marginBottom:14}}>{"★".repeat(st) + "☆".repeat(3-st)}</div>
           <div style={{fontSize:22, fontWeight:700, color:PU, marginBottom:10}}>{msg}</div>
@@ -962,7 +1165,8 @@ function ChildApp({ user, profile, onLogout }) {
                   <div style={{fontSize:12, opacity:0.9, marginBottom:8}}>Новые достижения!</div>
                   <div style={{display:"flex", flexWrap:"wrap", gap:8}}>
                     {resultData.newAch.map(id => {
-                      const a = ACH_BY_ID[id];
+                      const a = BADGE_BY_ID[id];
+                      if (!a) return null;
                       return (
                         <span key={id} style={{display:"flex", alignItems:"center", gap:6, padding:"6px 11px", background:"rgba(255,255,255,0.2)", borderRadius:20, fontSize:13, fontWeight:700, animation:"rankPop 0.5s ease-out"}}>
                           <span style={{fontSize:17}}>{a.emoji}</span>{a.name}
