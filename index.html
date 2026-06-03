@@ -161,13 +161,56 @@ console.log(window._FIRESTORE_RULES);
 
 <script>
 // ─── AUDIO ────────────────────────────────────────────────
+// AudioContext создаётся ЛЕНИВО при первом жесте пользователя.
+// На iOS Safari контекст рождается "suspended" и требует resume()
+// внутри пользовательского жеста, плюс играем неслышный буфер для разблокировки.
 const AudioCtx = window.AudioContext || window.webkitAudioContext;
 let _ctx = null;
-const getCtx = () => { if (!_ctx) _ctx = new AudioCtx(); return _ctx; };
+let _unlocked = false;
+
+function ensureCtx() {
+  if (_ctx || !AudioCtx) return _ctx;
+  try { _ctx = new AudioCtx(); } catch(e) { _ctx = null; }
+  return _ctx;
+}
+
+function tryResume() {
+  if (!_ctx) return;
+  // resume() вызываем ТОЛЬКО когда контекст реально приостановлен — не плодим вызовы
+  if (_ctx.state === "suspended") {
+    try { _ctx.resume().catch(()=>{}); } catch(e) {}
+  }
+}
+
+function unlockAudio() {
+  if (_unlocked) return;
+  const ctx = ensureCtx();
+  if (!ctx) return;
+  tryResume();
+  // прогрев — неслышный буфер для iOS Safari
+  try {
+    const buf = ctx.createBuffer(1, 1, 22050);
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(ctx.destination);
+    src.start(0);
+  } catch(e) {}
+  _unlocked = true;
+}
+
+// Одноразовый разблокировщик на первый жест на странице.
+const _unlockEvents = ["touchstart", "touchend", "mousedown", "click", "keydown"];
+function _onFirstGesture() {
+  unlockAudio();
+  _unlockEvents.forEach(ev => document.removeEventListener(ev, _onFirstGesture, true));
+}
+_unlockEvents.forEach(ev => document.addEventListener(ev, _onFirstGesture, { capture: true, passive: true }));
 
 const playSound = (type) => {
   try {
-    const ctx = getCtx();
+    const ctx = ensureCtx();
+    if (!ctx) return;
+    tryResume(); // дешёво, если уже running
     const g = ctx.createGain();
     g.connect(ctx.destination);
     const o = ctx.createOscillator();
@@ -238,6 +281,7 @@ window.playSound = playSound;
 // ─── ЧИСТАЯ ИГРОВАЯ ЛОГИКА (тестируется в Node, см. автотесты) ───
 (function(global){
   const NUMS = [2,3,4,5,6,7,8,9,10];
+  const SES_OPTS = [5, 10, 15, 20];
 
   // ── Звания (прогрессирующие пороги) ──
   const RANKS = [
@@ -494,6 +538,26 @@ window.playSound = playSound;
     };
   }
 
+  // Начальные настройки выбора тренировки: берём из профиля, иначе дефолты.
+  // Невалидные/устаревшие значения отбрасываются.
+  function pickInitialSettings(profile, defaults){
+    defaults = defaults || { tables: [2,3,4,5], sessionLength: 20 };
+    const lt = profile && profile.lastTables;
+    let tables = null;
+    if (Array.isArray(lt) && lt.length > 0){
+      const filtered = lt.filter(n => Number.isInteger(n) && n >= 2 && n <= 10);
+      // убираем дубликаты, сохраняя порядок
+      const seen = new Set();
+      tables = filtered.filter(n => seen.has(n) ? false : (seen.add(n), true));
+    }
+    if (!tables || tables.length === 0) tables = [...defaults.tables];
+
+    const ls = profile && profile.lastSessionLength;
+    const sessionLength = SES_OPTS.includes(ls) ? ls : defaults.sessionLength;
+
+    return { tables, sessionLength };
+  }
+
   // Защёлка: первый вызов commit() возвращает true, остальные — false
   function makeSaveGate(){
     let saved = false;
@@ -505,13 +569,13 @@ window.playSound = playSound;
   }
 
   const GAME = {
-    NUMS, RANKS, rankIndex, getRank, isLevelUp,
+    NUMS, SES_OPTS, RANKS, rankIndex, getRank, isLevelUp,
     comboMultiplier, nextCombo, computeAnswerXP, sessionBonus,
     CHAINS, CHAIN_ORDER, CHAIN_TITLES, BADGES, BADGE_BY_ID,
     computeUnlockedBadges, migrateLegacy, mergeOwned, visibleChainBadges,
     todayStr, computeStreak, updateDailyCorrect, countTablesMastered,
     wt, pick,
-    computeSessionCommit, makeSaveGate,
+    computeSessionCommit, makeSaveGate, pickInitialSettings,
   };
   global.GAME = GAME;
   if (typeof module !== "undefined" && module.exports) module.exports = GAME;
@@ -527,8 +591,8 @@ const db = window._db;
 const ADMIN_NAME = window._ADMIN_NAME;
 const ADMIN_PASS = window._ADMIN_PASS;
 
-const SES_OPTS = [5, 10, 15, 20];
-const NUMS = [2,3,4,5,6,7,8,9,10];
+const SES_OPTS = window.GAME.SES_OPTS;
+const NUMS = window.GAME.NUMS;
 const PU = "#534AB7", PL = "#EEEDFE", GR = "#16A34A", RD = "#DC2626";
 
 // ─── HELPERS ─────────────────────────────────────────────
@@ -539,7 +603,8 @@ const G = window.GAME;
 const { getRank, isLevelUp, computeAnswerXP, comboMultiplier, nextCombo, sessionBonus,
         CHAIN_ORDER, CHAIN_TITLES, BADGE_BY_ID, computeUnlockedBadges, migrateLegacy,
         mergeOwned, visibleChainBadges, todayStr, computeStreak, updateDailyCorrect,
-        countTablesMastered, pick, computeSessionCommit, makeSaveGate } = G;
+        countTablesMastered, pick, computeSessionCommit, makeSaveGate,
+        pickInitialSettings } = G;
 
 const hc = f => {
   if (!f || f.c+f.w===0) return {bg:"#E5E7EB", tx:"#9CA3AF"};
@@ -775,8 +840,9 @@ function ChildApp({ user, profile, onLogout }) {
   const [facts, setFacts] = useState({});
   const [sessions, setSessions] = useState([]);
   const [inviteCode, setInviteCode] = useState(profile.inviteCode || "");
-  const [tbs, setTbs] = useState([2,3,4,5]);
-  const [ses, setSes] = useState(20);
+  const initSettings = pickInitialSettings(profile);
+  const [tbs, setTbs] = useState(initSettings.tables);
+  const [ses, setSes] = useState(initSettings.sessionLength);
   const [fact, setFact] = useState(null);
   const [ans, setAns] = useState("");
   const [ph, setPh] = useState("q");
@@ -812,6 +878,11 @@ function ChildApp({ user, profile, onLogout }) {
         db.collection("users").doc(user.uid).update({ streakDays: newStreak, lastActiveDate: today }).catch(()=>{});
       }
       setProf(p);
+      // Применяем сохранённые настройки тренировки из свежего профиля,
+      // если они отличаются от того, что было получено через prop при маунте.
+      const fresh = pickInitialSettings(p);
+      setTbs(fresh.tables);
+      setSes(fresh.sessionLength);
       if (!p.inviteCode) {
         const c = await ensureInviteCode(user.uid, p);
         if (c) setInviteCode(c);
@@ -956,6 +1027,13 @@ function ChildApp({ user, profile, onLogout }) {
   const startTrain = () => {
     if (!tbs.length) return;
     if (saving) return; // защита от гонки: не стартуем новую сессию, пока пишем предыдущую
+    // Запоминаем выбранный режим в профиле, чтобы при следующем заходе подставить как дефолт.
+    const lastTables = [...tbs];
+    const lastSessionLength = ses;
+    if (prof.lastTables?.join(",") !== lastTables.join(",") || prof.lastSessionLength !== lastSessionLength) {
+      db.collection("users").doc(user.uid).update({ lastTables, lastSessionLength }).catch(()=>{});
+      setProf(prev => ({...(prev || {}), lastTables, lastSessionLength}));
+    }
     t0.current = Date.now();
     startDateRef.current = todayStr(); // календарный день фиксируем по моменту старта
     sTimes.current = [];
