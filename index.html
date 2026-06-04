@@ -682,25 +682,11 @@ window.playSound = playSound;
   }
 
   // ── Режим изучения таблиц ──
-  // Озвучка строки: "5 на 6, 30" — без слова "равно".
-  // Запятая даёт естественную короткую паузу в SpeechSynthesis вместо слова "равно".
-  function speechText(a, b){ return `${a} на ${b}, ${a * b}`; }
-
   // Полный столбик таблицы умножения для множителя a (b от 1 до 10).
   function tableRows(a){
     const rows = [];
     for (let b = 1; b <= 10; b++) rows.push({ a, b, p: a * b });
     return rows;
-  }
-
-  // Из списка голосов SpeechSynthesis выбираем русский. Если нет — null (не валим приложение).
-  function pickRussianVoice(voices){
-    if (!Array.isArray(voices) || voices.length === 0) return null;
-    // Приоритет: ru-RU > любой ru-*
-    const exact = voices.find(v => v && typeof v.lang === "string" && v.lang.toLowerCase() === "ru-ru");
-    if (exact) return exact;
-    const ru = voices.find(v => v && typeof v.lang === "string" && v.lang.toLowerCase().startsWith("ru"));
-    return ru || null;
   }
 
   // Защёлка: первый вызов commit() возвращает true, остальные — false
@@ -721,7 +707,7 @@ window.playSound = playSound;
     todayStr, computeStreak, updateDailyCorrect, countTablesMastered,
     wt, pick, unlinkChild,
     computeSessionCommit, makeSaveGate, pickInitialSettings,
-    speechText, tableRows, pickRussianVoice,
+    tableRows,
   };
   global.GAME = GAME;
   if (typeof module !== "undefined" && module.exports) module.exports = GAME;
@@ -750,8 +736,7 @@ const { getRank, isLevelUp, computeAnswerXP, comboMultiplier, nextCombo, session
         CHAIN_ORDER, CHAIN_TITLES, BADGE_BY_ID, computeUnlockedBadges, migrateLegacy,
         mergeOwned, visibleChainBadges, ownedBadgesByChain, todayStr, computeStreak, updateDailyCorrect,
         countTablesMastered, pick, computeSessionCommit, makeSaveGate,
-        pickInitialSettings, unlinkChild,
-        speechText, tableRows, pickRussianVoice } = G;
+        pickInitialSettings, unlinkChild, tableRows } = G;
 
 const hc = f => {
   if (!f || f.c+f.w===0) return {bg:"#E5E7EB", tx:"#9CA3AF"};
@@ -1013,86 +998,69 @@ function ChildApp({ user, profile, onLogout }) {
   const startDateRef = useRef(null);
   const commitSessionRef = useRef(null);
 
-  // ── Режим изучения таблиц + Web Speech ──
+  // ── Режим изучения таблиц + воспроизведение MP3 ──
   const [studyTable, setStudyTable] = useState(2);
   const [studyActiveRow, setStudyActiveRow] = useState(-1);
   const [studyPlayingAll, setStudyPlayingAll] = useState(false);
-  const [studyVoice, setStudyVoice] = useState(null);
-  const playAllAbort = useRef(false);
+  const currentAudioRef = useRef(null);
+  const playAllAbortRef = useRef(false);
   const studyTouchX = useRef(null);
 
-  useEffect(() => {
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
-    const load = () => {
-      try {
-        const list = window.speechSynthesis.getVoices();
-        const v = pickRussianVoice(list);
-        if (v) setStudyVoice(v);
-      } catch(e) {}
-    };
-    load();
-    try { window.speechSynthesis.onvoiceschanged = load; } catch(e) {}
-    return () => { try { window.speechSynthesis.onvoiceschanged = null; } catch(e) {} };
-  }, []);
+  const stopCurrentAudio = () => {
+    const a = currentAudioRef.current;
+    if (a) {
+      try { a.pause(); a.currentTime = 0; } catch(e) {}
+      currentAudioRef.current = null;
+    }
+  };
 
-  const speakRow = (a, b) => {
+  const playClipFor = (a, b) => {
     try {
-      if (!("speechSynthesis" in window)) return;
-      window.speechSynthesis.cancel();
-      // На первом проигрывании голоса могут быть ещё не готовы — допросим
-      let voice = studyVoice;
-      if (!voice) {
-        const list = window.speechSynthesis.getVoices();
-        voice = pickRussianVoice(list);
-        if (voice) setStudyVoice(voice);
-      }
-      const u = new SpeechSynthesisUtterance(speechText(a, b));
-      u.lang = "ru-RU";
-      u.rate = 0.9;
-      if (voice) u.voice = voice;
-      window.speechSynthesis.speak(u);
-    } catch(e) {}
+      stopCurrentAudio();
+      const audio = new Audio(`audio/${a}x${b}.mp3`);
+      currentAudioRef.current = audio;
+      const p = audio.play();
+      if (p && typeof p.catch === "function") p.catch(() => {});
+      return audio;
+    } catch(e) { return null; }
   };
 
   const tapStudyRow = (idx, a, b) => {
     if (studyPlayingAll) return;
     setStudyActiveRow(idx);
     setTimeout(() => setStudyActiveRow(prev => prev === idx ? -1 : prev), 600);
-    speakRow(a, b);
+    playClipFor(a, b);
   };
 
   const stopPlayAll = () => {
-    playAllAbort.current = true;
-    try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch(e) {}
+    playAllAbortRef.current = true;
+    stopCurrentAudio();
     setStudyPlayingAll(false);
     setStudyActiveRow(-1);
   };
 
   const playWholeTable = (a) => {
     if (studyPlayingAll) { stopPlayAll(); return; }
-    if (!("speechSynthesis" in window)) return;
     const rows = tableRows(a);
     setStudyPlayingAll(true);
-    playAllAbort.current = false;
+    playAllAbortRef.current = false;
     let i = 0;
-    const speakNext = () => {
-      if (playAllAbort.current) return;
+    const playNext = () => {
+      if (playAllAbortRef.current) return;
       if (i >= rows.length) { setStudyPlayingAll(false); setStudyActiveRow(-1); return; }
       setStudyActiveRow(i);
       const r = rows[i];
-      try {
-        const u = new SpeechSynthesisUtterance(speechText(r.a, r.b));
-        u.lang = "ru-RU";
-        u.rate = 0.9;
-        if (studyVoice) u.voice = studyVoice;
-        const advance = () => { i++; setTimeout(speakNext, 220); };
-        u.onend = advance;
-        u.onerror = advance;
-        window.speechSynthesis.cancel();
-        window.speechSynthesis.speak(u);
-      } catch(e) { i++; setTimeout(speakNext, 220); }
+      const audio = playClipFor(r.a, r.b);
+      const advance = () => {
+        if (playAllAbortRef.current) return;
+        i++;
+        setTimeout(playNext, 200); // пауза 200 мс между файлами
+      };
+      if (!audio) { advance(); return; }
+      audio.onended = advance;
+      audio.onerror = advance;
     };
-    speakNext();
+    playNext();
   };
 
   const onStudyTouchStart = (e) => { studyTouchX.current = e.touches[0]?.clientX ?? null; };
@@ -1108,11 +1076,11 @@ function ChildApp({ user, profile, onLogout }) {
     else if (dx > 0 && idx > 0) { stopPlayAll(); setStudyTable(tables[idx-1]); }
   };
 
-  // Выход со страницы изучения — остановить речь
+  // Выход со страницы изучения — остановить воспроизведение
   useEffect(() => {
     if (sc !== "study") {
-      playAllAbort.current = true;
-      try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch(e) {}
+      playAllAbortRef.current = true;
+      stopCurrentAudio();
       if (studyPlayingAll) setStudyPlayingAll(false);
     }
   }, [sc]);
