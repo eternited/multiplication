@@ -119,11 +119,14 @@
     padding: 0 clamp(8px, 3vw, 16px);
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    justify-content: center;
     border-radius: 10px;
     transition: background 0.2s;
     cursor: pointer;
   }
+  .study-row .study-lhs { min-width: clamp(70px, 28vw, 120px); text-align: right; }
+  .study-row .study-eq  { padding: 0 clamp(8px, 3vw, 14px); color: #9CA3AF; font-weight: 500; }
+  .study-row .study-rhs { min-width: clamp(40px, 14vw, 60px); text-align: left; }
   .study-row + .study-row { border-top: 1px solid #F3F4F6; }
   /* Сжимаем шрифт и отступы на коротких экранах (iPhone 7 / SE / mini) */
   @media (max-height: 700px) {
@@ -1005,11 +1008,35 @@ function ChildApp({ user, profile, onLogout }) {
   const currentAudioRef = useRef(null);
   const playAllAbortRef = useRef(false);
   const studyTouchX = useRef(null);
+  const audioCacheRef = useRef({});         // key "axb" → Audio (предзагруженный)
+  const audioCacheLoadedRef = useRef(false); // предзагрузка делается один раз
+
+  // Предзагрузка всех 90 mp3 при первом заходе на экран изучения
+  useEffect(() => {
+    if (sc !== "study") return;
+    if (audioCacheLoadedRef.current) return;
+    audioCacheLoadedRef.current = true;
+    for (let a = 2; a <= 10; a++) {
+      for (let b = 1; b <= 10; b++) {
+        const key = `${a}x${b}`;
+        if (!audioCacheRef.current[key]) {
+          try {
+            const audio = new Audio(`audio/${key}.mp3`);
+            audio.preload = "auto";
+            audio.load();
+            audioCacheRef.current[key] = audio;
+          } catch(e) {}
+        }
+      }
+    }
+  }, [sc]);
 
   const stopCurrentAudio = () => {
     const a = currentAudioRef.current;
     if (a) {
       try { a.pause(); a.currentTime = 0; } catch(e) {}
+      // снимаем хэндлеры цепочки, чтобы не сработали после остановки
+      try { a.onended = null; a.onerror = null; } catch(e) {}
       currentAudioRef.current = null;
     }
   };
@@ -1017,7 +1044,14 @@ function ChildApp({ user, profile, onLogout }) {
   const playClipFor = (a, b) => {
     try {
       stopCurrentAudio();
-      const audio = new Audio(`audio/${a}x${b}.mp3`);
+      const key = `${a}x${b}`;
+      let audio = audioCacheRef.current[key];
+      if (!audio) {
+        // fallback: если кэш не успел / отсутствует — создаём на лету и кладём в кэш
+        audio = new Audio(`audio/${key}.mp3`);
+        audioCacheRef.current[key] = audio;
+      }
+      try { audio.currentTime = 0; } catch(e) {}
       currentAudioRef.current = audio;
       const p = audio.play();
       if (p && typeof p.catch === "function") p.catch(() => {});
@@ -1477,9 +1511,9 @@ function ChildApp({ user, profile, onLogout }) {
               <div key={i} onClick={() => tapStudyRow(i, r.a, r.b)} role="button" className="study-row"
                 style={{background: active ? PL : "transparent",
                   color: active ? PU : "#1F2937", fontWeight: active ? 800 : 700}}>
-                <span>{r.a} × {r.b}</span>
-                <span style={{color:"#9CA3AF", fontWeight:500, padding:"0 10px"}}>=</span>
-                <span style={{minWidth:"clamp(40px, 12vw, 60px)", textAlign:"right"}}>{r.p}</span>
+                <span className="study-lhs">{r.a} × {r.b}</span>
+                <span className="study-eq">=</span>
+                <span className="study-rhs">{r.p}</span>
               </div>
             );
           })}
