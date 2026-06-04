@@ -5,21 +5,29 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover" />
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
-<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="Умножение" />
+<meta name="theme-color" content="#F5F3FF" />
 <title>Таблица умножения</title>
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  html, body { background: #F5F3FF; }
   html { height: 100%; overscroll-behavior: none; }
   body {
     height: 100%; overflow: hidden;
     position: fixed; top: 0; left: 0; right: 0; bottom: 0;
     overscroll-behavior: none; touch-action: none;
-    background: #F5F3FF; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   }
-  #root { height: 100%; overflow-y: auto; overscroll-behavior-y: contain; touch-action: pan-y; -webkit-overflow-scrolling: touch; }
+  #root { height: 100%; overflow-y: auto; overscroll-behavior-y: contain; touch-action: pan-y; -webkit-overflow-scrolling: touch; background: #F5F3FF; }
   button:active { opacity: 0.75; transform: scale(0.97); }
   input { -webkit-appearance: none; appearance: none; }
+  /* Поля ввода — выделение и редактирование работают как обычно */
+  input, textarea, [contenteditable="true"] {
+    -webkit-user-select: text;
+    user-select: text;
+    -webkit-touch-callout: default;
+  }
   @keyframes xpFloat {
     0%   { opacity: 0; transform: translateY(4px) scale(0.7); }
     20%  { opacity: 1; transform: translateY(-8px) scale(1.15); }
@@ -1386,7 +1394,7 @@ function ChildApp({ user, profile, onLogout }) {
     return (
       <div style={base}>
         {showLevelUp && resultData && resultData.newRank && (
-          <div onClick={() => setShowLevelUp(false)}
+          <div
             style={{position:"fixed", inset:0, zIndex:200, display:"flex", alignItems:"center", justifyContent:"center", padding:"max(20px, env(safe-area-inset-top)) 20px max(20px, env(safe-area-inset-bottom))", overflow:"hidden",
               background:"radial-gradient(circle at 50% 40%, #3B3680 0%, #1B1840 70%, #11101F 100%)"}}>
             {Array.from({length: 16}).map((_, i) => {
@@ -1399,7 +1407,7 @@ function ChildApp({ user, profile, onLogout }) {
                   animation:`confettiFall ${dur}s linear ${delay}s infinite`, pointerEvents:"none"}}>{emoji}</span>
               );
             })}
-            <div onClick={e => e.stopPropagation()} style={{position:"relative", textAlign:"center", color:"#fff", maxWidth:340, width:"100%"}}>
+            <div style={{position:"relative", textAlign:"center", color:"#fff", maxWidth:340, width:"100%"}}>
               <div style={{fontSize:15, fontWeight:700, letterSpacing:2, opacity:0.85, marginBottom:10, textTransform:"uppercase"}}>Новый уровень!</div>
               <div style={{fontSize:96, marginBottom:10, animation:"celebPop 0.6s ease-out"}}>{resultData.newRank.emoji}</div>
               <div style={{fontSize:13, opacity:0.85, marginBottom:4}}>Новое звание</div>
