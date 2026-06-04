@@ -99,6 +99,8 @@
     margin-bottom: clamp(10px, 2dvh, 22px);
   }
   .train-q-text { font-size: clamp(34px, 7.5vw, 50px); letter-spacing: clamp(1px, 0.5vw, 3px); margin-bottom: clamp(10px, 2dvh, 22px); }
+  .study-row { font-size: clamp(18px, 5.5vw, 26px); padding: clamp(8px, 1.8dvh, 14px) clamp(12px, 4vw, 18px); }
+  .study-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; }
   .train-a-box  { height: clamp(54px, 9dvh, 68px); font-size: clamp(28px, 7vw, 38px); }
   /* Полноэкранные оверлеи (modal, level-up, parent stop confirm) */
   .overlay-fixed {
@@ -645,6 +647,28 @@ window.playSound = playSound;
     return { tables, sessionLength };
   }
 
+  // ── Режим изучения таблиц ──
+  // Озвучка строки: "5 на 6, 30" — без слова "равно".
+  // Запятая даёт естественную короткую паузу в SpeechSynthesis вместо слова "равно".
+  function speechText(a, b){ return `${a} на ${b}, ${a * b}`; }
+
+  // Полный столбик таблицы умножения для множителя a (b от 1 до 10).
+  function tableRows(a){
+    const rows = [];
+    for (let b = 1; b <= 10; b++) rows.push({ a, b, p: a * b });
+    return rows;
+  }
+
+  // Из списка голосов SpeechSynthesis выбираем русский. Если нет — null (не валим приложение).
+  function pickRussianVoice(voices){
+    if (!Array.isArray(voices) || voices.length === 0) return null;
+    // Приоритет: ru-RU > любой ru-*
+    const exact = voices.find(v => v && typeof v.lang === "string" && v.lang.toLowerCase() === "ru-ru");
+    if (exact) return exact;
+    const ru = voices.find(v => v && typeof v.lang === "string" && v.lang.toLowerCase().startsWith("ru"));
+    return ru || null;
+  }
+
   // Защёлка: первый вызов commit() возвращает true, остальные — false
   function makeSaveGate(){
     let saved = false;
@@ -663,6 +687,7 @@ window.playSound = playSound;
     todayStr, computeStreak, updateDailyCorrect, countTablesMastered,
     wt, pick, unlinkChild,
     computeSessionCommit, makeSaveGate, pickInitialSettings,
+    speechText, tableRows, pickRussianVoice,
   };
   global.GAME = GAME;
   if (typeof module !== "undefined" && module.exports) module.exports = GAME;
@@ -691,7 +716,8 @@ const { getRank, isLevelUp, computeAnswerXP, comboMultiplier, nextCombo, session
         CHAIN_ORDER, CHAIN_TITLES, BADGE_BY_ID, computeUnlockedBadges, migrateLegacy,
         mergeOwned, visibleChainBadges, ownedBadgesByChain, todayStr, computeStreak, updateDailyCorrect,
         countTablesMastered, pick, computeSessionCommit, makeSaveGate,
-        pickInitialSettings, unlinkChild } = G;
+        pickInitialSettings, unlinkChild,
+        speechText, tableRows, pickRussianVoice } = G;
 
 const hc = f => {
   if (!f || f.c+f.w===0) return {bg:"#E5E7EB", tx:"#9CA3AF"};
@@ -953,6 +979,110 @@ function ChildApp({ user, profile, onLogout }) {
   const startDateRef = useRef(null);
   const commitSessionRef = useRef(null);
 
+  // ── Режим изучения таблиц + Web Speech ──
+  const [studyTable, setStudyTable] = useState(2);
+  const [studyActiveRow, setStudyActiveRow] = useState(-1);
+  const [studyPlayingAll, setStudyPlayingAll] = useState(false);
+  const [studyVoice, setStudyVoice] = useState(null);
+  const playAllAbort = useRef(false);
+  const studyTouchX = useRef(null);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+    const load = () => {
+      try {
+        const list = window.speechSynthesis.getVoices();
+        const v = pickRussianVoice(list);
+        if (v) setStudyVoice(v);
+      } catch(e) {}
+    };
+    load();
+    try { window.speechSynthesis.onvoiceschanged = load; } catch(e) {}
+    return () => { try { window.speechSynthesis.onvoiceschanged = null; } catch(e) {} };
+  }, []);
+
+  const speakRow = (a, b) => {
+    try {
+      if (!("speechSynthesis" in window)) return;
+      window.speechSynthesis.cancel();
+      // На первом проигрывании голоса могут быть ещё не готовы — допросим
+      let voice = studyVoice;
+      if (!voice) {
+        const list = window.speechSynthesis.getVoices();
+        voice = pickRussianVoice(list);
+        if (voice) setStudyVoice(voice);
+      }
+      const u = new SpeechSynthesisUtterance(speechText(a, b));
+      u.lang = "ru-RU";
+      u.rate = 0.9;
+      if (voice) u.voice = voice;
+      window.speechSynthesis.speak(u);
+    } catch(e) {}
+  };
+
+  const tapStudyRow = (idx, a, b) => {
+    if (studyPlayingAll) return;
+    setStudyActiveRow(idx);
+    setTimeout(() => setStudyActiveRow(prev => prev === idx ? -1 : prev), 600);
+    speakRow(a, b);
+  };
+
+  const stopPlayAll = () => {
+    playAllAbort.current = true;
+    try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch(e) {}
+    setStudyPlayingAll(false);
+    setStudyActiveRow(-1);
+  };
+
+  const playWholeTable = (a) => {
+    if (studyPlayingAll) { stopPlayAll(); return; }
+    if (!("speechSynthesis" in window)) return;
+    const rows = tableRows(a);
+    setStudyPlayingAll(true);
+    playAllAbort.current = false;
+    let i = 0;
+    const speakNext = () => {
+      if (playAllAbort.current) return;
+      if (i >= rows.length) { setStudyPlayingAll(false); setStudyActiveRow(-1); return; }
+      setStudyActiveRow(i);
+      const r = rows[i];
+      try {
+        const u = new SpeechSynthesisUtterance(speechText(r.a, r.b));
+        u.lang = "ru-RU";
+        u.rate = 0.9;
+        if (studyVoice) u.voice = studyVoice;
+        const advance = () => { i++; setTimeout(speakNext, 220); };
+        u.onend = advance;
+        u.onerror = advance;
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.speak(u);
+      } catch(e) { i++; setTimeout(speakNext, 220); }
+    };
+    speakNext();
+  };
+
+  const onStudyTouchStart = (e) => { studyTouchX.current = e.touches[0]?.clientX ?? null; };
+  const onStudyTouchEnd = (e) => {
+    const start = studyTouchX.current; studyTouchX.current = null;
+    if (start == null) return;
+    const dx = (e.changedTouches[0]?.clientX ?? start) - start;
+    if (Math.abs(dx) < 60) return;
+    const tables = [...G.NUMS]; // 2..10
+    const idx = tables.indexOf(studyTable);
+    if (idx < 0) return;
+    if (dx < 0 && idx < tables.length - 1) { stopPlayAll(); setStudyTable(tables[idx+1]); }
+    else if (dx > 0 && idx > 0) { stopPlayAll(); setStudyTable(tables[idx-1]); }
+  };
+
+  // Выход со страницы изучения — остановить речь
+  useEffect(() => {
+    if (sc !== "study") {
+      playAllAbort.current = true;
+      try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch(e) {}
+      if (studyPlayingAll) setStudyPlayingAll(false);
+    }
+  }, [sc]);
+
   useEffect(() => {
     (async () => {
       const data = await loadUserData(user.uid);
@@ -1209,8 +1339,12 @@ function ChildApp({ user, profile, onLogout }) {
       </div>
 
       <button onClick={startTrain} disabled={!tbs.length || saving}
-        style={{...W, height:56, borderRadius:16, background: (tbs.length && !saving) ? PU : "#9CA3AF", color:"#fff", fontSize:18, fontWeight:700, border:"none", cursor: saving ? "default" : "pointer", marginBottom:12}}>
+        style={{...W, height:56, borderRadius:16, background: (tbs.length && !saving) ? PU : "#9CA3AF", color:"#fff", fontSize:18, fontWeight:700, border:"none", cursor: saving ? "default" : "pointer", marginBottom:10}}>
         {saving ? "Сохранение…" : "Начать тренировку ▶"}
+      </button>
+      <button onClick={() => setSc("study")}
+        style={{...W, height:50, borderRadius:14, background:PL, color:PU, fontSize:16, fontWeight:700, border:`2px solid ${PU}33`, cursor:"pointer", marginBottom:10}}>
+        📖 Изучать таблицы
       </button>
       <button onClick={() => setSc("achievements")}
         style={{...W, height:50, borderRadius:14, background:"#fff", color:PU, fontSize:16, fontWeight:700, border:`2px solid ${PL}`, cursor:"pointer"}}>
@@ -1292,6 +1426,60 @@ function ChildApp({ user, profile, onLogout }) {
           style={{...W, height:52, borderRadius:14, background:PU, color:"#fff", fontSize:16, fontWeight:700, border:"none", cursor:"pointer", marginTop:20}}>
           ← К тренировке
         </button>
+      </div>
+    );
+  }
+
+  // ── STUDY (изучение таблиц с озвучкой) ────────────────
+  if (sc === "study") {
+    const rows = tableRows(studyTable);
+    return (
+      <div className="fit-screen" style={{background:"#F5F3FF"}}>
+        <div className="col" style={{display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:10}}>
+          <h2 style={{fontSize:18, fontWeight:700, color:PU, margin:0}}>📖 Изучение таблиц</h2>
+          <button onClick={() => setSc("home")} style={{height:36, padding:"0 14px", borderRadius:9, background:"transparent", color:"#6B7280", fontSize:14, border:"1.5px solid #D1D5DB", cursor:"pointer"}}>Назад</button>
+        </div>
+
+        <div className="col" style={{marginBottom:10}}>
+          <div style={{display:"flex", flexWrap:"wrap", gap:7, justifyContent:"center"}}>
+            {G.NUMS.map(n => {
+              const sel = n === studyTable;
+              return (
+                <button key={n} onClick={() => { if (n !== studyTable) { stopPlayAll(); setStudyTable(n); } }}
+                  style={{minWidth:44, height:42, borderRadius:10, border: sel ? `2.5px solid ${PU}` : "1.5px solid #D1D5DB", background: sel ? PL : "#fff", color: sel ? PU : "#6B7280", fontWeight: sel ? 700 : 500, fontSize:15, cursor:"pointer"}}>
+                  ×{n}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="col" style={{marginBottom:8}}>
+          <button onClick={() => playWholeTable(studyTable)}
+            style={{width:"100%", height:42, borderRadius:11, background: studyPlayingAll ? RD : "#fff", color: studyPlayingAll ? "#fff" : PU, fontSize:14, fontWeight:700, border: studyPlayingAll ? `1.5px solid ${RD}` : `1.5px solid ${PL}`, cursor:"pointer"}}>
+            {studyPlayingAll ? "■ Остановить" : `▶ Озвучить таблицу ×${studyTable}`}
+          </button>
+        </div>
+
+        <div className="col study-list"
+          onTouchStart={onStudyTouchStart} onTouchEnd={onStudyTouchEnd}
+          style={{background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:18, padding:"4px 6px"}}>
+          {rows.map((r, i) => {
+            const active = i === studyActiveRow;
+            return (
+              <div key={i} onClick={() => tapStudyRow(i, r.a, r.b)} role="button"
+                className="study-row"
+                style={{display:"flex", alignItems:"center", justifyContent:"space-between",
+                  background: active ? PL : "transparent", borderRadius:10, transition:"background 0.2s",
+                  cursor:"pointer", borderBottom: i < rows.length-1 ? "1px solid #F3F4F6" : "none",
+                  color: active ? PU : "#1F2937", fontWeight: active ? 800 : 700}}>
+                <span>{r.a} × {r.b}</span>
+                <span style={{color:"#9CA3AF", fontWeight:500, padding:"0 10px"}}>=</span>
+                <span style={{minWidth:54, textAlign:"right"}}>{r.p}</span>
+              </div>
+            );
+          })}
+        </div>
       </div>
     );
   }
