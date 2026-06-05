@@ -55,6 +55,20 @@
     0%, 100% { box-shadow: 0 0 0 0 rgba(251,191,36,0.55); }
     50%      { box-shadow: 0 0 28px 8px rgba(251,191,36,0.35); }
   }
+  /* Запрет landscape — визуально вращаем содержимое обратно в портрет.
+     Работает кросс-платформенно даже там, где Screen Orientation Lock не поддерживается. */
+  @media screen and (orientation: landscape) {
+    html {
+      transform: rotate(-90deg);
+      transform-origin: left top;
+      width: 100vh;
+      height: 100vw;
+      overflow-x: hidden;
+      position: absolute;
+      top: 100%;
+      left: 0;
+    }
+  }
   /* Адаптивные раскладки экранов */
   .scroll-screen {
     min-height: 100vh;
@@ -187,6 +201,15 @@ window._db = firebase.firestore();
 // записи будут синхронизироваться при появлении сети.
 window._db.enablePersistence({ synchronizeTabs: false })
   .catch(err => console.warn("Persistence unavailable:", err && err.code));
+
+// Запрет поворота: на Android Chrome и в PWA-режиме на iOS можно лочить
+// программно через Screen Orientation API. Где не поддерживается — работает CSS-fallback
+// @media (orientation: landscape) в <style>.
+try {
+  if (screen && screen.orientation && typeof screen.orientation.lock === "function") {
+    screen.orientation.lock("portrait").catch(() => {});
+  }
+} catch(e) {}
 
 // ─── ADMIN ────────────────────────────────────────────────
 // Захардкоженный пароль администратора — поменяй после первого входа.
@@ -627,6 +650,10 @@ window.playSound = playSound;
     const newTotalCorrect = (p.totalCorrect || 0) + (acc.sCor || 0);
     const newBest = Math.max(p.bestSessionXP || 0, sessionXP);
     const newMaxCombo = Math.max(p.maxCombo || 0, acc.maxCombo || 0);
+    // currentStreak — живая серия правильных ответов подряд, переносится между сессиями.
+    // Если в сессии были ошибки → finalCombo учитывает последний сброс; если ошибок не было →
+    // finalCombo = prevCurrentStreak + nC и серия продолжается.
+    const newCurrentStreak = (acc.finalCombo == null ? 0 : acc.finalCombo);
     const isPerfect = (acc.sTot === 20 && acc.sCor === 20);
     const newPerfect = (p.perfectSessions || 0) + (isPerfect ? 1 : 0);
     const daily = updateDailyCorrect(p.dailyCorrect, p.dailyDate, acc.startDate, acc.sCor || 0);
@@ -655,7 +682,7 @@ window.playSound = playSound;
 
     const profileUpdates = {
       totalXP: newTotalXP, bestSessionXP: newBest, totalCorrect: newTotalCorrect,
-      maxCombo: newMaxCombo, perfectSessions: newPerfect,
+      maxCombo: newMaxCombo, currentStreak: newCurrentStreak, perfectSessions: newPerfect,
       dailyCorrect: daily.dailyCorrect, dailyDate: daily.dailyDate,
       tablesMastered, achievements: all
     };
@@ -1188,6 +1215,7 @@ function ChildApp({ user, profile, onLogout }) {
       factsFull: r.facts,
       sCor: r.sCor, sTot: r.sTot, sXP: r.sXP,
       maxCombo: maxCombo.current,
+      finalCombo: r.combo || 0, // живая серия на момент окончания → станет новым currentStreak
       sTimes: [...sTimes.current],
       tables: r.tbs,
     };
@@ -1301,11 +1329,13 @@ function ChildApp({ user, profile, onLogout }) {
     t0.current = Date.now();
     startDateRef.current = todayStr(); // календарный день фиксируем по моменту старта
     sTimes.current = [];
-    maxCombo.current = 0;
+    // Серия правильных ответов подряд переносится между сессиями: при безошибочном финише она продолжает расти.
+    const carryStreak = prof.currentStreak || 0;
+    maxCombo.current = carryStreak;
     factsDeltaRef.current = {};
     saveGateRef.current = makeSaveGate();
     setSCor(0); setSTot(0);
-    setSXP(0); setCombo(0); setXpPop(null); setResultData(null); setShowLevelUp(false);
+    setSXP(0); setCombo(carryStreak); setXpPop(null); setResultData(null); setShowLevelUp(false);
     setFact(pick(tbs, facts));
     setAns(""); setPh("q"); setSc("train");
     qTime.current = Date.now();
