@@ -1011,7 +1011,12 @@ function ChildApp({ user, profile, onLogout }) {
   const audioCacheRef = useRef({});         // key "axb" → Audio (предзагруженный)
   const audioCacheLoadedRef = useRef(false); // предзагрузка делается один раз
 
-  // Предзагрузка всех 90 mp3 при первом заходе на экран изучения
+  // Предзагрузка всех 90 mp3 при первом заходе на экран изучения.
+  // Цель — прогреть HTTP-кэш браузера, чтобы любой последующий new Audio(url)
+  // получил данные мгновенно. Сами объекты держим в audioCacheRef, чтобы их
+  // не уничтожил GC до окончания загрузки — но для воспроизведения НЕ используем
+  // (избегаем play/pause-гонок на shared-элементах + iOS-ограничения на
+  // элементы, созданные не в user-gesture).
   useEffect(() => {
     if (sc !== "study") return;
     if (audioCacheLoadedRef.current) return;
@@ -1024,7 +1029,7 @@ function ChildApp({ user, profile, onLogout }) {
             const audio = new Audio(`audio/${key}.mp3`);
             audio.preload = "auto";
             audio.load();
-            audioCacheRef.current[key] = audio;
+            audioCacheRef.current[key] = audio; // удерживаем ссылку, не для воспроизведения
           } catch(e) {}
         }
       }
@@ -1034,8 +1039,9 @@ function ChildApp({ user, profile, onLogout }) {
   const stopCurrentAudio = () => {
     const a = currentAudioRef.current;
     if (a) {
-      try { a.pause(); a.currentTime = 0; } catch(e) {}
-      // снимаем хэндлеры цепочки, чтобы не сработали после остановки
+      // Свежий элемент при следующем воспроизведении — этот просто заглушаем и забываем.
+      // currentTime НЕ трогаем: на не до конца загруженном элементе это бросает ошибку.
+      try { a.pause(); } catch(e) {}
       try { a.onended = null; a.onerror = null; } catch(e) {}
       currentAudioRef.current = null;
     }
@@ -1044,14 +1050,10 @@ function ChildApp({ user, profile, onLogout }) {
   const playClipFor = (a, b) => {
     try {
       stopCurrentAudio();
-      const key = `${a}x${b}`;
-      let audio = audioCacheRef.current[key];
-      if (!audio) {
-        // fallback: если кэш не успел / отсутствует — создаём на лету и кладём в кэш
-        audio = new Audio(`audio/${key}.mp3`);
-        audioCacheRef.current[key] = audio;
-      }
-      try { audio.currentTime = 0; } catch(e) {}
+      // Каждое воспроизведение — НОВЫЙ Audio: предотвращает AbortError при rapid taps
+      // (старый и новый элементы независимы) и unlock-проблему на iOS (элемент создаётся
+      // внутри user-gesture). HTTP-кэш браузера уже прогрет, так что new Audio() мгновенен.
+      const audio = new Audio(`audio/${a}x${b}.mp3`);
       currentAudioRef.current = audio;
       const p = audio.play();
       if (p && typeof p.catch === "function") p.catch(() => {});
