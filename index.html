@@ -58,6 +58,24 @@
     0%, 100% { box-shadow: 0 0 0 0 rgba(251,191,36,0.55); }
     50%      { box-shadow: 0 0 28px 8px rgba(251,191,36,0.35); }
   }
+  /* Оверлей при повороте в landscape: блокирует UI, просит повернуть телефон обратно */
+  #landscape-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: #534AB7;
+    z-index: 99999;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    color: white;
+    font-size: 20px;
+    text-align: center;
+    padding: 32px;
+  }
+  @media screen and (orientation: landscape) {
+    #landscape-overlay { display: flex; }
+  }
   /* Адаптивные раскладки экранов */
   .scroll-screen {
     min-height: 100vh;
@@ -157,28 +175,14 @@
 </head>
 <body>
 <script>
-// Запрет поворота экрана: Screen Orientation API + повторная попытка при возврате в приложение.
-(function() {
-  try {
-    if (screen.orientation && screen.orientation.lock) {
-      screen.orientation.lock('portrait-primary').catch(function(){});
-    }
-  } catch(e) {}
-})();
-document.addEventListener('visibilitychange', function() {
-  if (!document.hidden) {
-    try {
-      if (screen.orientation && screen.orientation.lock) {
-        screen.orientation.lock('portrait-primary').catch(function(){});
-      }
-    } catch(e) {}
-  }
-});
-
 document.addEventListener('touchmove', function(e) {
   if (!e.target.closest('#root')) e.preventDefault();
 }, { passive: false });
 </script>
+<div id="landscape-overlay">
+  <div style="font-size:48px;margin-bottom:16px">↩️</div>
+  <div>Переверни телефон вертикально</div>
+</div>
 <div id="root"></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
