@@ -181,6 +181,13 @@ firebase.initializeApp(firebaseConfig);
 window._auth = firebase.auth();
 window._db = firebase.firestore();
 
+// Офлайн-режим: локальный кэш в IndexedDB. Должно стоять ДО любых запросов
+// (т.е. до onAuthStateChanged и до Firestore-обращений в коде ниже).
+// При офлайн-старте уже авторизованный пользователь получит данные из кэша,
+// записи будут синхронизироваться при появлении сети.
+window._db.enablePersistence({ synchronizeTabs: false })
+  .catch(err => console.warn("Persistence unavailable:", err && err.code));
+
 // ─── ADMIN ────────────────────────────────────────────────
 // Захардкоженный пароль администратора — поменяй после первого входа.
 window._ADMIN_NAME = "admin";
