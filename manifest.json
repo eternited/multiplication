@@ -1,0 +1,9 @@
+{
+  "name": "Таблица умножения",
+  "short_name": "Умножение",
+  "display": "standalone",
+  "orientation": "portrait",
+  "start_url": ".",
+  "background_color": "#F5F3FF",
+  "theme_color": "#534AB7"
+}

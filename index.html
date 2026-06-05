@@ -8,6 +8,9 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="Умножение" />
 <meta name="theme-color" content="#F5F3FF" />
+<meta name="screen-orientation" content="portrait" />
+<meta name="x5-orientation" content="portrait" />
+<link rel="manifest" href="manifest.json" />
 <title>Таблица умножения</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
@@ -54,20 +57,6 @@
   @keyframes glowPulse {
     0%, 100% { box-shadow: 0 0 0 0 rgba(251,191,36,0.55); }
     50%      { box-shadow: 0 0 28px 8px rgba(251,191,36,0.35); }
-  }
-  /* Запрет landscape — визуально вращаем содержимое обратно в портрет.
-     Работает кросс-платформенно даже там, где Screen Orientation Lock не поддерживается. */
-  @media screen and (orientation: landscape) {
-    html {
-      transform: rotate(-90deg);
-      transform-origin: left top;
-      width: 100vh;
-      height: 100vw;
-      overflow-x: hidden;
-      position: absolute;
-      top: 100%;
-      left: 0;
-    }
   }
   /* Адаптивные раскладки экранов */
   .scroll-screen {
@@ -168,6 +157,24 @@
 </head>
 <body>
 <script>
+// Запрет поворота экрана: Screen Orientation API + повторная попытка при возврате в приложение.
+(function() {
+  try {
+    if (screen.orientation && screen.orientation.lock) {
+      screen.orientation.lock('portrait-primary').catch(function(){});
+    }
+  } catch(e) {}
+})();
+document.addEventListener('visibilitychange', function() {
+  if (!document.hidden) {
+    try {
+      if (screen.orientation && screen.orientation.lock) {
+        screen.orientation.lock('portrait-primary').catch(function(){});
+      }
+    } catch(e) {}
+  }
+});
+
 document.addEventListener('touchmove', function(e) {
   if (!e.target.closest('#root')) e.preventDefault();
 }, { passive: false });
@@ -201,15 +208,6 @@ window._db = firebase.firestore();
 // записи будут синхронизироваться при появлении сети.
 window._db.enablePersistence({ synchronizeTabs: false })
   .catch(err => console.warn("Persistence unavailable:", err && err.code));
-
-// Запрет поворота: на Android Chrome и в PWA-режиме на iOS можно лочить
-// программно через Screen Orientation API. Где не поддерживается — работает CSS-fallback
-// @media (orientation: landscape) в <style>.
-try {
-  if (screen && screen.orientation && typeof screen.orientation.lock === "function") {
-    screen.orientation.lock("portrait").catch(() => {});
-  }
-} catch(e) {}
 
 // ─── ADMIN ────────────────────────────────────────────────
 // Захардкоженный пароль администратора — поменяй после первого входа.
@@ -303,8 +301,24 @@ let _unlocked = false;
 
 function ensureCtx() {
   if (_ctx || !AudioCtx) return _ctx;
-  try { _ctx = new AudioCtx(); } catch(e) { _ctx = null; }
+  try {
+    _ctx = new AudioCtx();
+    setupContextStateWatch();
+  } catch(e) { _ctx = null; }
   return _ctx;
+}
+
+// Авто-resume: если контекст ушёл в suspended (например после выхода из беззвучного режима
+// на iOS/Android или смены аудио-маршрута), сразу пробуем разбудить.
+function setupContextStateWatch() {
+  if (!_ctx) return;
+  try {
+    _ctx.onstatechange = function() {
+      if (_ctx && _ctx.state === "suspended") {
+        try { _ctx.resume().catch(function(){}); } catch(e) {}
+      }
+    };
+  } catch(e) {}
 }
 
 function tryResume() {
@@ -331,13 +345,21 @@ function unlockAudio() {
   _unlocked = true;
 }
 
-// Одноразовый разблокировщик на первый жест на странице.
+// Слушатель пользовательских жестов: первый раз разблокирует контекст,
+// при последующих — будит контекст, если он снова ушёл в suspended
+// (выход из беззвучного режима, смена аудио-маршрута и т.д.).
+// Подписка остаётся активной всё время, чтобы покрыть рантайм-suspend.
 const _unlockEvents = ["touchstart", "touchend", "mousedown", "click", "keydown"];
-function _onFirstGesture() {
-  unlockAudio();
-  _unlockEvents.forEach(ev => document.removeEventListener(ev, _onFirstGesture, true));
+function _onUserGesture() {
+  if (!_unlocked) {
+    unlockAudio();
+    return;
+  }
+  if (_ctx && _ctx.state !== "running") {
+    tryResume();
+  }
 }
-_unlockEvents.forEach(ev => document.addEventListener(ev, _onFirstGesture, { capture: true, passive: true }));
+_unlockEvents.forEach(ev => document.addEventListener(ev, _onUserGesture, { capture: true, passive: true }));
 
 const playSound = (type) => {
   try {
@@ -658,9 +680,12 @@ window.playSound = playSound;
     const newPerfect = (p.perfectSessions || 0) + (isPerfect ? 1 : 0);
     const daily = updateDailyCorrect(p.dailyCorrect, p.dailyDate, acc.startDate, acc.sCor || 0);
     const tablesMastered = countTablesMastered(acc.factsFull || {});
+    // streakDays считаем по дню СТАРТА сессии — стрик растёт только за завершённую сессию,
+    // а не за пустой заход в приложение.
+    const newStreakDays = computeStreak(p.lastActiveDate, p.streakDays, acc.startDate);
 
     const stats = {
-      maxCombo: newMaxCombo, streakDays: p.streakDays || 1, totalCorrect: newTotalCorrect,
+      maxCombo: newMaxCombo, streakDays: newStreakDays, totalCorrect: newTotalCorrect,
       totalXP: newTotalXP, perfectSessions: newPerfect, dailyCorrect: daily.dailyCorrect, tablesMastered
     };
     const ownedBefore = migrateLegacy(p.achievements);
@@ -684,6 +709,7 @@ window.playSound = playSound;
       totalXP: newTotalXP, bestSessionXP: newBest, totalCorrect: newTotalCorrect,
       maxCombo: newMaxCombo, currentStreak: newCurrentStreak, perfectSessions: newPerfect,
       dailyCorrect: daily.dailyCorrect, dailyDate: daily.dailyDate,
+      streakDays: newStreakDays, lastActiveDate: acc.startDate,
       tablesMastered, achievements: all
     };
 
@@ -1160,14 +1186,8 @@ function ChildApp({ user, profile, onLogout }) {
       const data = await loadUserData(user.uid);
       let p = data ? {...data.profile} : {...profile};
       if (data) { setFacts(data.facts); setSessions(data.sessions); }
-      // Обновляем серию дней при заходе
-      const today = todayStr();
-      if (p.lastActiveDate !== today) {
-        const newStreak = computeStreak(p.lastActiveDate, p.streakDays);
-        p.streakDays = newStreak;
-        p.lastActiveDate = today;
-        db.collection("users").doc(user.uid).update({ streakDays: newStreak, lastActiveDate: today }).catch(()=>{});
-      }
+      // streakDays/lastActiveDate здесь больше НЕ обновляем — это делается
+      // только в commitSession при завершении полной сессии (см. computeSessionCommit).
       setProf(p);
       // Применяем сохранённые настройки тренировки из свежего профиля,
       // если они отличаются от того, что было получено через prop при маунте.
