@@ -675,11 +675,20 @@ window.playSound = playSound;
     const newTotalXP = prevTotalXP + sessionXP;
     const newTotalCorrect = (p.totalCorrect || 0) + (acc.sCor || 0);
     const newBest = Math.max(p.bestSessionXP || 0, sessionXP);
-    const newMaxCombo = Math.max(p.maxCombo || 0, acc.maxCombo || 0);
-    // currentStreak — живая серия правильных ответов подряд, переносится между сессиями.
-    // Если в сессии были ошибки → finalCombo учитывает последний сброс; если ошибок не было →
-    // finalCombo = prevCurrentStreak + nC и серия продолжается.
-    const newCurrentStreak = (acc.finalCombo == null ? 0 : acc.finalCombo);
+    // currentStreak — серия правильных подряд МЕЖДУ сессиями. Используется только для бейджей.
+    // Множитель XP (×2/×3) на неё не смотрит — он считается в React от in-session combo, который стартует с 0.
+    // Без ошибок: серия продолжается → prev + sCor. С ошибками: серия порвана → новая серия = finalCombo
+    // (правильные после последней ошибки в этой сессии). Без finalCombo (backward-compat) → 0.
+    let newCurrentStreak;
+    if (acc.finalCombo == null) {
+      newCurrentStreak = 0;
+    } else {
+      const hadErrors = (acc.sCor || 0) < (acc.sTot || 0);
+      newCurrentStreak = hadErrors ? acc.finalCombo : ((p.currentStreak || 0) + (acc.sCor || 0));
+    }
+    // maxCombo учитывает и пик in-session, и накопленную межсессионную серию — иначе combo_30/50/100
+    // были бы недостижимы при лимите сессии в 20 вопросов.
+    const newMaxCombo = Math.max(p.maxCombo || 0, acc.maxCombo || 0, newCurrentStreak);
     const isPerfect = (acc.sTot === 20 && acc.sCor === 20);
     const newPerfect = (p.perfectSessions || 0) + (isPerfect ? 1 : 0);
     const daily = updateDailyCorrect(p.dailyCorrect, p.dailyDate, acc.startDate, acc.sCor || 0);
@@ -1353,13 +1362,13 @@ function ChildApp({ user, profile, onLogout }) {
     t0.current = Date.now();
     startDateRef.current = todayStr(); // календарный день фиксируем по моменту старта
     sTimes.current = [];
-    // Серия правильных ответов подряд переносится между сессиями: при безошибочном финише она продолжает расти.
-    const carryStreak = prof.currentStreak || 0;
-    maxCombo.current = carryStreak;
+    // combo (множитель XP) — чисто внутрисессионный счётчик: ВСЕГДА с 0.
+    // currentStreak (для бейджей) живёт в profile, не смешивается с combo.
+    maxCombo.current = 0;
     factsDeltaRef.current = {};
     saveGateRef.current = makeSaveGate();
     setSCor(0); setSTot(0);
-    setSXP(0); setCombo(carryStreak); setXpPop(null); setResultData(null); setShowLevelUp(false);
+    setSXP(0); setCombo(0); setXpPop(null); setResultData(null); setShowLevelUp(false);
     setFact(pick(tbs, facts));
     setAns(""); setPh("q"); setSc("train");
     qTime.current = Date.now();
