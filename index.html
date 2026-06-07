@@ -766,6 +766,29 @@ window.playSound = playSound;
     return rows;
   }
 
+  // Фильтрация сессий по периоду. now передаваемо для детерминированных тестов.
+  // Границы инклюзивные: сессия ровно 24ч назад попадает в "day" (s.date >= cutoff).
+  const PERIOD_MS = { day: 86400000, week: 7 * 86400000, month: 30 * 86400000 };
+  function filterSessionsByPeriod(sessions, period, now){
+    if (!Array.isArray(sessions)) return [];
+    if (period === "all" || !period) return sessions.slice();
+    const ms = PERIOD_MS[period];
+    if (!ms) return sessions.slice();
+    const cutoff = (now == null ? Date.now() : now) - ms;
+    return sessions.filter(s => (s && (s.date || 0)) >= cutoff);
+  }
+
+  // Агрегаты по подмножеству сессий: всего, верных, точность.
+  function aggregateSessions(sessions){
+    if (!Array.isArray(sessions) || sessions.length === 0) {
+      return { count: 0, totalQ: 0, totalC: 0, accuracy: 0 };
+    }
+    let totalQ = 0, totalC = 0;
+    for (const s of sessions){ totalQ += (s.total || 0); totalC += (s.correct || 0); }
+    const accuracy = totalQ > 0 ? Math.round(totalC / totalQ * 100) : 0;
+    return { count: sessions.length, totalQ, totalC, accuracy };
+  }
+
   // Защёлка: первый вызов commit() возвращает true, остальные — false
   function makeSaveGate(){
     let saved = false;
@@ -784,6 +807,7 @@ window.playSound = playSound;
     todayStr, computeStreak, updateDailyCorrect, countTablesMastered,
     wt, pick, unlinkChild,
     computeSessionCommit, makeSaveGate, pickInitialSettings,
+    filterSessionsByPeriod, aggregateSessions, PERIOD_MS,
     tableRows,
   };
   global.GAME = GAME;
@@ -813,7 +837,8 @@ const { getRank, isLevelUp, computeAnswerXP, comboMultiplier, nextCombo, session
         CHAIN_ORDER, CHAIN_TITLES, BADGE_BY_ID, computeUnlockedBadges, migrateLegacy,
         mergeOwned, visibleChainBadges, ownedBadgesByChain, todayStr, computeStreak, updateDailyCorrect,
         countTablesMastered, pick, computeSessionCommit, makeSaveGate,
-        pickInitialSettings, unlinkChild, tableRows } = G;
+        pickInitialSettings, unlinkChild, tableRows,
+        filterSessionsByPeriod, aggregateSessions } = G;
 
 const hc = f => {
   if (!f || f.c+f.w===0) return {bg:"#E5E7EB", tx:"#9CA3AF"};
@@ -829,14 +854,19 @@ const fmtDay = ts => new Date(ts).toLocaleDateString("ru-RU", {day:"numeric", mo
 const fmtS = s => s < 60 ? `${s}с` : `${Math.floor(s/60)}м ${s%60}с`;
 
 // ─── FIRESTORE I/O ───────────────────────────────────────
-async function loadUserData(uid) {
+async function loadUserData(uid, opts) {
+  const allSessions = !!(opts && opts.allSessions);
   const userDoc = await db.collection("users").doc(uid).get();
   if (!userDoc.exists) return null;
   const profile = userDoc.data();
   const factsSnap = await db.collection("users").doc(uid).collection("facts").get();
   const facts = {};
   factsSnap.forEach(d => facts[d.id] = d.data());
-  const sessSnap = await db.collection("users").doc(uid).collection("sessions").orderBy("date", "desc").limit(50).get();
+  // Для родителя/админа грузим ВСЕ сессии (фильтр по периоду — на клиенте).
+  // Для ребёнка/прочих остаётся лимит 50, чтобы не тянуть всё ради собственных нужд.
+  let q = db.collection("users").doc(uid).collection("sessions").orderBy("date", "desc");
+  if (!allSessions) q = q.limit(50);
+  const sessSnap = await q.get();
   const sessions = [];
   sessSnap.forEach(d => sessions.push({id: d.id, ...d.data()}));
   return { uid, profile, facts, sessions };
@@ -1799,9 +1829,10 @@ function ChildApp({ user, profile, onLogout }) {
 
 // ─── STATS VIEW (used by parent & admin) ─────────────────
 function StatsView({ facts, sessions, name, onBack, profile }) {
-  const allQ = sessions.reduce((s,x) => s+(x.total||0), 0);
-  const allC = sessions.reduce((s,x) => s+(x.correct||0), 0);
-  const acc = allQ > 0 ? Math.round(allC/allQ*100) : 0;
+  const [period, setPeriod] = useState("week"); // day | week | month | all
+  const filtered = useMemo(() => filterSessionsByPeriod(sessions || [], period), [sessions, period]);
+  const aggr = useMemo(() => aggregateSessions(filtered), [filtered]);
+  // Слабые места и тепловая карта — по всем фактам (общий прогресс, не фильтруется по периоду).
   const topBad = Object.entries(facts || {})
     .filter(([,f]) => f.c+f.w > 2)
     .sort((a,b) => a[1].c/(a[1].c+a[1].w) - b[1].c/(b[1].c+b[1].w))
@@ -1810,6 +1841,8 @@ function StatsView({ facts, sessions, name, onBack, profile }) {
   const showGamify = profile && profile.role === "child";
   const rk = showGamify ? getRank(profile.totalXP) : null;
   const ownedGroups = showGamify ? ownedBadgesByChain(profile.achievements) : [];
+
+  const PERIOD_LABELS = [["day","День"],["week","Неделя"],["month","Месяц"],["all","Всё время"]];
 
   return (
     <div style={base}>
@@ -1876,8 +1909,21 @@ function StatsView({ facts, sessions, name, onBack, profile }) {
         </>
       )}
 
+      <div style={{...W, display:"flex", gap:6, marginBottom:10, background:"#fff", padding:4, borderRadius:12, border:"1.5px solid #E5E7EB"}}>
+        {PERIOD_LABELS.map(([v, l]) => {
+          const sel = period === v;
+          return (
+            <button key={v} onClick={() => setPeriod(v)}
+              style={{flex:1, height:34, borderRadius:9, border:"none", background: sel ? PU : "transparent",
+                color: sel ? "#fff" : "#6B7280", fontSize:13, fontWeight: sel ? 700 : 500, cursor:"pointer"}}>
+              {l}
+            </button>
+          );
+        })}
+      </div>
+
       <div style={{...W, display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:9, marginBottom:18}}>
-        {[["Сессий", sessions.length], ["Вопросов", allQ], ["Точность", `${acc}%`]].map(([l,v]) => (
+        {[["Сессий", aggr.count], ["Вопросов", aggr.totalQ], ["Точность", `${aggr.accuracy}%`]].map(([l,v]) => (
           <div key={l} style={{background:"#fff", borderRadius:12, padding:"14px 8px", textAlign:"center", border:"1.5px solid #E5E7EB"}}>
             <div style={{fontSize:11, color:"#6B7280", marginBottom:5}}>{l}</div>
             <div style={{fontSize:24, fontWeight:800, color:"#1F2937"}}>{v}</div>
@@ -1928,28 +1974,32 @@ function StatsView({ facts, sessions, name, onBack, profile }) {
         </div>
       )}
 
-      {sessions.length > 0 ? (
-        <div style={{...W, background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:18, padding:"16px 14px"}}>
-          <div style={{fontSize:14, fontWeight:700, marginBottom:12, color:"#374151"}}>История сессий</div>
-          {sessions.slice(0, 15).map((s, i) => (
-            <div key={i} style={{display:"flex", alignItems:"center", justifyContent:"space-between", padding:"9px 0", borderBottom: i < Math.min(sessions.length,15)-1 ? "1px solid #F3F4F6" : "none"}}>
-              <div>
-                <div style={{fontSize:13, color:"#1F2937"}}>{fmtD(s.date)}</div>
-                <div style={{fontSize:11, color:"#9CA3AF"}}>×{(s.tables||[]).join(", ×")} · {fmtS(s.dur||0)}</div>
-                {s.avgTime != null && <div style={{fontSize:11, color:"#9CA3AF"}}>avg {s.avgTime}с · min {s.minTime}с · max {s.maxTime}с</div>}
-              </div>
-              <div style={{textAlign:"right"}}>
-                <div style={{fontSize:17, fontWeight:700, color: s.correct/s.total>=0.8 ? GR : s.correct/s.total>=0.6 ? "#D97706" : RD}}>{Math.round(s.correct/s.total*100)}%</div>
-                <div style={{fontSize:11, color:"#9CA3AF"}}>{s.correct}/{s.total}</div>
-              </div>
-            </div>
-          ))}
+      <div style={{...W, background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:18, padding:"16px 14px"}}>
+        <div style={{fontSize:14, fontWeight:700, marginBottom:12, color:"#374151"}}>
+          История сессий {filtered.length > 0 && <span style={{fontSize:12, color:"#9CA3AF", fontWeight:500}}>({filtered.length})</span>}
         </div>
-      ) : (
-        <div style={{...W, textAlign:"center", padding:"28px 0", color:"#9CA3AF", fontSize:15}}>
-          Пока нет данных.
-        </div>
-      )}
+        {filtered.length > 0 ? (
+          <div style={{maxHeight:"50vh", overflowY:"auto", WebkitOverflowScrolling:"touch"}}>
+            {filtered.map((s, i) => (
+              <div key={s.id || i} style={{display:"flex", alignItems:"center", justifyContent:"space-between", padding:"9px 2px", borderBottom: i < filtered.length-1 ? "1px solid #F3F4F6" : "none"}}>
+                <div>
+                  <div style={{fontSize:13, color:"#1F2937"}}>{fmtD(s.date)}</div>
+                  <div style={{fontSize:11, color:"#9CA3AF"}}>×{(s.tables||[]).join(", ×")} · {fmtS(s.dur||0)}</div>
+                  {s.avgTime != null && <div style={{fontSize:11, color:"#9CA3AF"}}>avg {s.avgTime}с · min {s.minTime}с · max {s.maxTime}с</div>}
+                </div>
+                <div style={{textAlign:"right"}}>
+                  <div style={{fontSize:17, fontWeight:700, color: s.correct/s.total>=0.8 ? GR : s.correct/s.total>=0.6 ? "#D97706" : RD}}>{Math.round(s.correct/s.total*100)}%</div>
+                  <div style={{fontSize:11, color:"#9CA3AF"}}>{s.correct}/{s.total}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div style={{textAlign:"center", padding:"20px 0", color:"#9CA3AF", fontSize:14}}>
+            За этот период сессий не было
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -1992,7 +2042,7 @@ function ParentApp({ user, profile, onLogout }) {
   const openChild = async (c) => {
     setSelected(c);
     setChildData(null);
-    const data = await loadUserData(c.uid);
+    const data = await loadUserData(c.uid, { allSessions: true });
     setChildData(data);
   };
 
@@ -2136,7 +2186,7 @@ function AdminApp({ user, profile, onLogout }) {
   const openUser = async (u) => {
     setSelected(u);
     setSelectedData(null);
-    const data = await loadUserData(u.uid);
+    const data = await loadUserData(u.uid, { allSessions: true });
     setSelectedData(data);
   };
 
