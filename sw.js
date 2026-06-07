@@ -1,9 +1,11 @@
-const CACHE = 'multiply-v2';
+const CACHE = 'multiply-v3';
 
 const STATIC = [
   '.',
   './index.html',
-  './manifest.json'
+  './manifest.json',
+  './icons/icon-192.png',
+  './icons/icon-512.png'
 ];
 
 // Все 90 аудиофайлов
