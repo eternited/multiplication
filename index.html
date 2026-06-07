@@ -2259,6 +2259,14 @@ ReactDOM.createRoot(document.getElementById("root")).render(<App />);
 </script>
 <script>
 if ('serviceWorker' in navigator) {
+  // Когда новый SW активируется и берёт под контроль страницу — перезагружаем,
+  // чтобы пользователь сразу получил свежий index.html, а не залипший в кэше.
+  var _swReloadGuard = false;
+  navigator.serviceWorker.addEventListener('controllerchange', function() {
+    if (_swReloadGuard) return;
+    _swReloadGuard = true;
+    window.location.reload();
+  });
   window.addEventListener('load', function() {
     navigator.serviceWorker.register('./sw.js')
       .then(function(reg) {

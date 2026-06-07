@@ -1,4 +1,4 @@
-const CACHE = 'multiply-v1';
+const CACHE = 'multiply-v2';
 
 const STATIC = [
   '.',
@@ -15,6 +15,12 @@ for (let a = 2; a <= 10; a++) {
 }
 
 const ALL = STATIC.concat(AUDIO);
+
+// HTML-shell всегда грузим сначала из сети, чтобы пользователь моментально получал
+// последние правки кода. Кэшированный вариант — только для офлайна.
+function isHtmlShell(url) {
+  return /\/(index\.html)?(\?.*)?$/.test(url) || url.indexOf('/index.html') !== -1;
+}
 
 // Установка — кэшировать всё
 self.addEventListener('install', function(e) {
@@ -47,6 +53,21 @@ self.addEventListener('fetch', function(e) {
       e.request.url.indexOf('gstatic.com') !== -1 ||
       e.request.url.indexOf('cdnjs.cloudflare.com') !== -1 ||
       e.request.url.indexOf('firestore.googleapis.com') !== -1) {
+    return;
+  }
+  // HTML-shell: network-first (свежая версия приходит каждый онлайн-визит, не залипает старый код)
+  if (e.request.mode === 'navigate' || isHtmlShell(e.request.url)) {
+    e.respondWith(
+      fetch(e.request).then(function(response) {
+        if (response && response.status === 200) {
+          var clone = response.clone();
+          caches.open(CACHE).then(function(cache) { cache.put(e.request, clone); });
+        }
+        return response;
+      }).catch(function() {
+        return caches.match(e.request);
+      })
+    );
     return;
   }
   e.respondWith(
