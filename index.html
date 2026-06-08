@@ -618,12 +618,24 @@ window.playSound = playSound;
   }
 
   // ── Серия дней ──
-  function todayStr(){ return new Date().toISOString().slice(0, 10); }
+  // Дата календарного дня считается в ЛОКАЛЬНОЙ таймзоне пользователя, не в UTC.
+  // Иначе игрок, играющий поздно вечером (например, в 23:00 МСК = 20:00 UTC) и снова на
+  // следующий день в 01:00 МСК (= 22:00 UTC того же UTC-дня), теряет инкремент стрика —
+  // или, наоборот, два разных Moscow-дня могут отстоять в UTC на 2 суток и обнулить стрик.
+  function todayStr(now){
+    const d = now || new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
   function computeStreak(lastActiveDate, prevStreak, today){
     today = today || todayStr();
     if (lastActiveDate === today) return prevStreak || 1;
-    const t = new Date(today + "T00:00:00Z");
-    const yesterday = new Date(t.getTime() - 86400000).toISOString().slice(0, 10);
+    const [y, m, d] = today.split("-").map(Number);
+    const t = new Date(y, m - 1, d);
+    t.setDate(t.getDate() - 1);
+    const yesterday = `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,"0")}-${String(t.getDate()).padStart(2,"0")}`;
     if (lastActiveDate === yesterday) return (prevStreak || 0) + 1;
     return 1;
   }
