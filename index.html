@@ -884,17 +884,36 @@ async function loadUserData(uid, opts) {
   return { uid, profile, facts, sessions };
 }
 
+// Идемпотентное создание кода привязки: резервирование кода и запись inviteCode в профиль
+// идут одной транзакцией. Иначе параллельные вызовы (например, из AuthScreen.submit и из
+// ChildApp.useEffect, который монтируется сразу после регистрации) создают разные коды,
+// один из которых остаётся осиротевшим в коллекции inviteCodes.
 async function ensureInviteCode(uid, profile) {
-  if (profile.inviteCode) return profile.inviteCode;
+  const userRef = db.collection("users").doc(uid);
+  // Переданный profile может быть устаревшим (race с регистрацией) — перечитываем.
+  const freshSnap = await userRef.get();
+  if (freshSnap.exists && freshSnap.data().inviteCode) return freshSnap.data().inviteCode;
+  const childName = (freshSnap.exists && freshSnap.data().name) || profile.name;
+
   for (let attempt = 0; attempt < 6; attempt++) {
     const code = gen6();
-    const ref = db.collection("inviteCodes").doc(code);
     try {
-      const exists = await ref.get();
-      if (exists.exists) continue;
-      await ref.set({ childUid: uid, childName: profile.name, createdAt: Date.now(), used: false });
-      await db.collection("users").doc(uid).update({ inviteCode: code });
-      return code;
+      const result = await db.runTransaction(async (tx) => {
+        // Внутри транзакции снова смотрим профиль — параллельный вызов мог уже записать код.
+        const userSnap = await tx.get(userRef);
+        if (userSnap.exists && userSnap.data().inviteCode) {
+          return { existing: userSnap.data().inviteCode };
+        }
+        const codeRef = db.collection("inviteCodes").doc(code);
+        const codeSnap = await tx.get(codeRef);
+        if (codeSnap.exists) return { collision: true };
+        tx.set(codeRef, { childUid: uid, childName, createdAt: Date.now(), used: false });
+        tx.update(userRef, { inviteCode: code });
+        return { created: code };
+      });
+      if (result && result.existing) return result.existing;
+      if (result && result.created) return result.created;
+      // collision — пробуем сгенерировать другой 6-значный код
     } catch(e) {}
   }
   return null;
@@ -905,12 +924,19 @@ async function linkParentToChildByCode(parentUid, code) {
   const snap = await ref.get();
   if (!snap.exists) return { ok: false, error: "Код не найден" };
   const { childUid, childName } = snap.data();
-  if (!childUid || !childName) return { ok: false, error: "Код устарел, попроси у ребёнка новый" };
+  if (!childUid) return { ok: false, error: "Код устарел, попроси у ребёнка новый" };
+  // У старых кодов childName мог не записаться — тянем из профиля ребёнка как fallback.
+  let name = childName;
+  if (!name) {
+    const childSnap = await db.collection("users").doc(childUid).get();
+    name = childSnap.exists ? (childSnap.data().name || "") : "";
+    if (!name) return { ok: false, error: "Код устарел, попроси у ребёнка новый" };
+  }
   await db.collection("parentLinks").doc(parentUid).collection("children").doc(childUid).set({
-    name: childName, linkedAt: Date.now()
+    name, linkedAt: Date.now()
   });
   await ref.update({ used: true, lastLinkedAt: Date.now() });
-  return { ok: true, name: childName };
+  return { ok: true, name };
 }
 
 // ─── APP ─────────────────────────────────────────────────
