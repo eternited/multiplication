@@ -368,6 +368,15 @@ _unlockEvents.forEach(ev => document.addEventListener(ev, _onUserGesture, { capt
 
 const playSound = (type) => {
   try {
+    // Тактильная отдача — работает даже в беззвучном режиме.
+    // Android Chrome/Firefox: поддержано. iOS Safari Vibration API не реализует — no-op без вреда.
+    if (navigator.vibrate) {
+      const pattern = type === "wrong"   ? [30, 50, 30]
+                    : type === "eq"      ? 25
+                    : type === "levelup" ? [40, 80, 40]
+                    : 12; // num, del — короткий тап по клавише
+      navigator.vibrate(pattern);
+    }
     const ctx = ensureCtx();
     if (!ctx) return;
     tryResume(); // дешёво, если уже running
