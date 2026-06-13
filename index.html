@@ -366,10 +366,44 @@ function _onUserGesture() {
 }
 _unlockEvents.forEach(ev => document.addEventListener(ev, _onUserGesture, { capture: true, passive: true }));
 
+// iOS Safari Vibration API не поддерживает, но Taptic Engine реагирует на
+// очень короткий низкочастотный импульс через AudioContext. На Android это
+// безопасный no-op: импульс на 35 Гц / 12-50 мс не слышен (ниже порога
+// большинства динамиков и пределов слуха ребёнка). Идёт ПАРАЛЛЕЛЬНО с
+// основным звуком кнопки — собственный osc/gain не мешает другим узлам.
+function hapticPulse(duration) {
+  try {
+    ensureCtx();
+    if (!_ctx || _ctx.state !== "running") {
+      tryResume();
+      return;
+    }
+    duration = duration || 0.015;
+
+    const osc = _ctx.createOscillator();
+    const gain = _ctx.createGain();
+
+    osc.type = "sine";
+    osc.frequency.value = 35;
+
+    gain.gain.setValueAtTime(0, _ctx.currentTime);
+    gain.gain.linearRampToValueAtTime(0.8, _ctx.currentTime + 0.001);
+    gain.gain.linearRampToValueAtTime(0, _ctx.currentTime + duration);
+
+    osc.connect(gain);
+    gain.connect(_ctx.destination);
+
+    osc.start(_ctx.currentTime);
+    osc.stop(_ctx.currentTime + duration + 0.01);
+  } catch(e) {}
+}
+
 const playSound = (type) => {
   try {
     // Тактильная отдача — работает даже в беззвучном режиме.
-    // Android Chrome/Firefox: поддержано. iOS Safari Vibration API не реализует — no-op без вреда.
+    // Android Chrome/Firefox: navigator.vibrate. iOS Safari: низкочастотный
+    // импульс через Taptic Engine (см. hapticPulse). Вызываем оба параллельно —
+    // на каждой платформе сработает только подходящий канал.
     if (navigator.vibrate) {
       const pattern = type === "wrong"   ? [30, 50, 30]
                     : type === "eq"      ? 25
@@ -377,6 +411,11 @@ const playSound = (type) => {
                     : 12; // num, del — короткий тап по клавише
       navigator.vibrate(pattern);
     }
+    const hapticDur = type === "wrong"   ? 0.04
+                    : type === "eq"      ? 0.025
+                    : type === "levelup" ? 0.05
+                    : 0.012; // num, del
+    hapticPulse(hapticDur);
     const ctx = ensureCtx();
     if (!ctx) return;
     tryResume(); // дешёво, если уже running
