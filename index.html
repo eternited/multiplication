@@ -253,6 +253,14 @@ service cloud.firestore {
       allow read, write: if request.auth != null
         && request.auth.uid == parentUid;
     }
+
+    match /adminConfig/{doc} {
+      // Чтение хэша админ-пароля нужно всем авторизованным (проверка при входе админа).
+      // Запись — только админу (и при первой инициализации — при матче с фолбэк-паролем
+      // запись выполняет уже залогиненный админ-аккаунт после signIn).
+      allow read: if request.auth != null;
+      allow write: if isAdmin();
+    }
   }
 }
 */
@@ -288,6 +296,14 @@ service cloud.firestore {
     match /parentLinks/{parentUid}/{document=**} {
       allow read, write: if request.auth != null
         && request.auth.uid == parentUid;
+    }
+
+    match /adminConfig/{doc} {
+      // Чтение хэша админ-пароля нужно всем авторизованным (проверка при входе админа).
+      // Запись — только админу (и при первой инициализации — при матче с фолбэк-паролем
+      // запись выполняет уже залогиненный админ-аккаунт после signIn).
+      allow read: if request.auth != null;
+      allow write: if isAdmin();
     }
   }
 }`;
@@ -859,6 +875,147 @@ window.playSound = playSound;
     };
   }
 
+  // ── Админ-помощники (чистые функции для тестов) ──
+  const ADMIN_PERIOD_MS = {
+    day: 86400000, week: 7*86400000, month: 30*86400000, quarter: 90*86400000, all: Infinity
+  };
+
+  function countByRole(users){
+    const r = { child: 0, parent: 0, admin: 0, other: 0 };
+    if (!Array.isArray(users)) return r;
+    for (const u of users) {
+      const role = (u && u.role) || "other";
+      if (r[role] != null) r[role]++; else r.other++;
+    }
+    return r;
+  }
+
+  // "Активен за период" — по lastLogin (если есть) или по lastActive (фолбэк для старых профилей).
+  function countActiveSince(users, periodMs, now){
+    if (!Array.isArray(users) || !(periodMs > 0)) return 0;
+    const cutoff = (now == null ? Date.now() : now) - periodMs;
+    let n = 0;
+    for (const u of users) {
+      const ts = (u && (u.lastLogin || u.lastActive)) || 0;
+      if (ts >= cutoff) n++;
+    }
+    return n;
+  }
+
+  function countRegistrationsSince(users, periodMs, now, role){
+    if (!Array.isArray(users) || !(periodMs > 0)) return 0;
+    const cutoff = (now == null ? Date.now() : now) - periodMs;
+    let n = 0;
+    for (const u of users) {
+      if (!u || !u.createdAt) continue;
+      if (role && u.role !== role) continue;
+      if (u.createdAt >= cutoff) n++;
+    }
+    return n;
+  }
+
+  // Бакеты регистраций по дням (локальная дата). Включает дни без регистраций (0).
+  function groupRegistrationsByDay(users, startMs, endMs, role){
+    const buckets = {};
+    const dayMs = 86400000;
+    const dayKey = (ts) => {
+      const d = new Date(ts);
+      const y = d.getFullYear();
+      const m = String(d.getMonth()+1).padStart(2,"0");
+      const dd = String(d.getDate()).padStart(2,"0");
+      return `${y}-${m}-${dd}`;
+    };
+    // Подготовим пустые бакеты на все дни от startMs до endMs включительно.
+    const sDay = new Date(startMs); sDay.setHours(0,0,0,0);
+    const eDay = new Date(endMs); eDay.setHours(0,0,0,0);
+    for (let t = sDay.getTime(); t <= eDay.getTime(); t += dayMs) {
+      buckets[dayKey(t)] = 0;
+    }
+    if (Array.isArray(users)) {
+      for (const u of users) {
+        if (!u || !u.createdAt) continue;
+        if (role && u.role !== role) continue;
+        if (u.createdAt < startMs || u.createdAt > endMs) continue;
+        const k = dayKey(u.createdAt);
+        if (k in buckets) buckets[k]++;
+      }
+    }
+    return buckets;
+  }
+
+  function filterUsers(users, opts){
+    if (!Array.isArray(users)) return [];
+    const o = opts || {};
+    const search = (o.search || "").trim().toLowerCase();
+    const role = o.role && o.role !== "all" ? o.role : null;
+    const periodMs = o.registeredSinceMs > 0 ? o.registeredSinceMs : null;
+    const cutoff = periodMs ? ((o.now == null ? Date.now() : o.now) - periodMs) : null;
+    return users.filter(u => {
+      if (!u) return false;
+      if (role && u.role !== role) return false;
+      if (search && !String(u.name || "").toLowerCase().includes(search)) return false;
+      if (cutoff != null && (!u.createdAt || u.createdAt < cutoff)) return false;
+      return true;
+    });
+  }
+
+  function sortUsers(users, key, dir){
+    const arr = Array.isArray(users) ? users.slice() : [];
+    const d = dir === "asc" ? 1 : -1;
+    const num = v => (typeof v === "number" ? v : 0);
+    const str = v => String(v == null ? "" : v).toLowerCase();
+    arr.sort((a, b) => {
+      switch (key) {
+        case "name": {
+          const av = str(a.name), bv = str(b.name);
+          return av < bv ? -d : av > bv ? d : 0;
+        }
+        case "role": {
+          const av = str(a.role), bv = str(b.role);
+          return av < bv ? -d : av > bv ? d : 0;
+        }
+        case "createdAt":   return (num(a.createdAt) - num(b.createdAt)) * d;
+        case "lastLogin":   return ((num(a.lastLogin) || num(a.lastActive)) - (num(b.lastLogin) || num(b.lastActive))) * d;
+        case "sessionsCount": return (num(a.sessionsCount) - num(b.sessionsCount)) * d;
+        case "lastActive":  return (num(a.lastActive) - num(b.lastActive)) * d;
+        default: return 0;
+      }
+    });
+    return arr;
+  }
+
+  function paginate(arr, page, pageSize){
+    const list = Array.isArray(arr) ? arr : [];
+    const ps = pageSize > 0 ? pageSize : 50;
+    const totalPages = Math.max(1, Math.ceil(list.length / ps));
+    const p = Math.min(Math.max(1, page || 1), totalPages);
+    const start = (p - 1) * ps;
+    return { items: list.slice(start, start + ps), totalPages, page: p, total: list.length };
+  }
+
+  function validatePasswordChange(current, next1, next2, minLen){
+    const min = minLen > 0 ? minLen : 8;
+    if (!current) return { ok: false, error: "Введите текущий пароль" };
+    if (!next1 || next1.length < min) return { ok: false, error: `Новый пароль минимум ${min} символов` };
+    if (next1 !== next2) return { ok: false, error: "Пароли не совпадают" };
+    if (next1 === current) return { ok: false, error: "Новый пароль совпадает с текущим" };
+    return { ok: true };
+  }
+
+  // Хэш SHA-256 → hex. Использует Web Crypto API; в тестах принимает инжектируемый subtle.
+  async function sha256Hex(text, subtleImpl){
+    const subtle = subtleImpl
+      || (typeof crypto !== "undefined" && crypto.subtle)
+      || (typeof globalThis !== "undefined" && globalThis.crypto && globalThis.crypto.subtle);
+    if (!subtle) throw new Error("Web Crypto API недоступен");
+    const enc = new TextEncoder().encode(String(text));
+    const buf = await subtle.digest("SHA-256", enc);
+    const bytes = new Uint8Array(buf);
+    let hex = "";
+    for (let i = 0; i < bytes.length; i++) hex += bytes[i].toString(16).padStart(2, "0");
+    return hex;
+  }
+
   const GAME = {
     NUMS, SES_OPTS, RANKS, rankIndex, getRank, isLevelUp,
     comboMultiplier, nextCombo, computeAnswerXP, sessionBonus,
@@ -869,6 +1026,9 @@ window.playSound = playSound;
     computeSessionCommit, makeSaveGate, pickInitialSettings,
     filterSessionsByPeriod, aggregateSessions, PERIOD_MS,
     tableRows,
+    ADMIN_PERIOD_MS, countByRole, countActiveSince, countRegistrationsSince,
+    groupRegistrationsByDay, filterUsers, sortUsers, paginate,
+    validatePasswordChange, sha256Hex,
   };
   global.GAME = GAME;
   if (typeof module !== "undefined" && module.exports) module.exports = GAME;
@@ -898,7 +1058,10 @@ const { getRank, isLevelUp, computeAnswerXP, comboMultiplier, nextCombo, session
         mergeOwned, visibleChainBadges, ownedBadgesByChain, todayStr, computeStreak, updateDailyCorrect,
         countTablesMastered, pick, computeSessionCommit, makeSaveGate,
         pickInitialSettings, unlinkChild, tableRows,
-        filterSessionsByPeriod, aggregateSessions } = G;
+        filterSessionsByPeriod, aggregateSessions,
+        ADMIN_PERIOD_MS, countByRole, countActiveSince, countRegistrationsSince,
+        groupRegistrationsByDay, filterUsers, sortUsers, paginate,
+        validatePasswordChange, sha256Hex } = G;
 
 const hc = f => {
   if (!f || f.c+f.w===0) return {bg:"#E5E7EB", tx:"#9CA3AF"};
@@ -987,6 +1150,40 @@ async function linkParentToChildByCode(parentUid, code) {
   return { ok: true, name };
 }
 
+// ─── ADMIN PASSWORD ──────────────────────────────────────
+// Пароль админа хранится как SHA-256 hex в adminConfig/main. Если документа нет —
+// пробуем фолбэк на захардкоженный ADMIN_PASS (для миграции; уберём, когда все среды
+// поднимутся). В обоих случаях после успешного входа пишем актуальный хэш в Firestore.
+async function getStoredAdminPasswordHash() {
+  try {
+    const snap = await db.collection("adminConfig").doc("main").get();
+    if (snap.exists) return snap.data().passwordHash || null;
+  } catch(e) {}
+  return null;
+}
+
+async function setStoredAdminPasswordHash(hash) {
+  await db.collection("adminConfig").doc("main")
+    .set({ passwordHash: hash, updatedAt: Date.now() }, { merge: true });
+}
+
+// Возвращает true, если пароль валиден. Делает авто-миграцию: при первом успешном
+// входе с захардкоженным паролем подменяем доку хэшем.
+async function verifyAdminPassword(plain) {
+  const inputHash = await sha256Hex(plain);
+  const stored = await getStoredAdminPasswordHash();
+  if (stored) return inputHash === stored;
+  // Документа в Firestore ещё нет — сравниваем с фолбэк-паролем.
+  const fallbackHash = await sha256Hex(ADMIN_PASS);
+  if (inputHash === fallbackHash) {
+    // Самозапись хэша в Firestore — после первой удачной авторизации админа.
+    // Ошибки игнорируем: если правила пока запрещают запись, в следующий раз попробуем снова.
+    try { await setStoredAdminPasswordHash(fallbackHash); } catch(e) {}
+    return true;
+  }
+  return false;
+}
+
 // ─── APP ─────────────────────────────────────────────────
 const W = {width:"100%", maxWidth:420, boxSizing:"border-box"};
 // base — скроллящийся экран; padding учитывает safe-area-inset для устройств с чёлкой / нижней полоской жестов
@@ -1005,7 +1202,10 @@ function App() {
         const doc = await db.collection("users").doc(u.uid).get();
         if (!doc.exists) { await auth.signOut(); setAuthState("guest"); return; }
         const p = doc.data();
-        setUser(u); setProfile(p);
+        // Фиксируем факт входа (без блокировки UI). Старые профили без lastLogin это поле получат тут же.
+        const now = Date.now();
+        db.collection("users").doc(u.uid).update({ lastLogin: now }).catch(()=>{});
+        setUser(u); setProfile({ ...p, lastLogin: now });
         setAuthState(p.role || "child");
       } catch(e) {
         console.error(e); setAuthState("guest");
@@ -1045,17 +1245,33 @@ function AuthScreen() {
     if (pass.length < 6) { setErr("Пароль минимум 6 символов"); return; }
     setBusy(true);
     try {
-      const isAdminLogin = n.toLowerCase() === ADMIN_NAME && pass === ADMIN_PASS;
+      const isAdminName = n.toLowerCase() === ADMIN_NAME;
       const email = nameToEmail(n);
       if (tab === "login") {
-        if (isAdminLogin) {
+        if (isAdminName) {
+          // Проверяем актуальный хэш в Firestore (с авто-миграцией с фолбэка).
+          const okPass = await verifyAdminPassword(pass);
+          if (!okPass) { setErr("Неверный пароль"); setBusy(false); return; }
+          // Email в Firebase Auth — стабильный (admin@multiplication.app), пароль ТОЖЕ должен
+          // совпадать с тем, что хранится в Firebase Auth. При первом логине с новым паролем
+          // нужно обновить пароль в Auth — это уже произойдёт в окне смены пароля админа.
+          // Для входа используем ADMIN_PASS (фолбэк) либо введённый — пробуем введённый сначала.
           try { await auth.signInWithEmailAndPassword(email, pass); }
           catch(e) {
             if (e.code === "auth/user-not-found" || e.code === "auth/invalid-credential" || e.code === "auth/invalid-login-credentials") {
-              const cred = await auth.createUserWithEmailAndPassword(email, pass);
-              await db.collection("users").doc(cred.user.uid).set({
-                name: n, role: "admin", createdAt: Date.now()
-              });
+              // Учётки в Firebase Auth ещё нет — создаём (первая инсталляция).
+              try {
+                const cred = await auth.createUserWithEmailAndPassword(email, pass);
+                await db.collection("users").doc(cred.user.uid).set({
+                  name: n, role: "admin", createdAt: Date.now()
+                });
+              } catch(e2) {
+                // Если учётка есть, но Auth-пароль не совпадает с введённым (хэш в Firestore
+                // обновили, а Auth-пароль ещё нет) — пробуем фолбэк.
+                if (e2.code === "auth/email-already-in-use") {
+                  await auth.signInWithEmailAndPassword(email, ADMIN_PASS);
+                } else throw e2;
+              }
             } else throw e;
           }
         } else {
@@ -2228,6 +2444,83 @@ function ParentApp({ user, profile, onLogout }) {
 }
 
 // ─── ADMIN APP ───────────────────────────────────────────
+// Форма смены пароля админа: проверяет текущий через хэш Firestore,
+// обновляет пароль в Firebase Auth (для последующих логинов) и записывает новый хэш.
+function AdminSettings({ onBack }) {
+  const [cur, setCur] = useState("");
+  const [n1, setN1] = useState("");
+  const [n2, setN2] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [okMsg, setOkMsg] = useState("");
+
+  const submit = async () => {
+    setErr(""); setOkMsg("");
+    const v = validatePasswordChange(cur, n1, n2, 8);
+    if (!v.ok) { setErr(v.error); return; }
+    setBusy(true);
+    try {
+      // Проверка текущего пароля по хэшу.
+      const okCur = await verifyAdminPassword(cur);
+      if (!okCur) { setErr("Текущий пароль неверен"); setBusy(false); return; }
+      // Обновляем Auth-пароль (нужно для последующих signInWithEmailAndPassword).
+      try { await auth.currentUser.updatePassword(n1); }
+      catch(e) {
+        if (e.code === "auth/requires-recent-login") {
+          // Реаутентификация текущим паролем.
+          const cred = firebase.auth.EmailAuthProvider.credential(auth.currentUser.email, cur);
+          await auth.currentUser.reauthenticateWithCredential(cred);
+          await auth.currentUser.updatePassword(n1);
+        } else throw e;
+      }
+      // Затем — хэш в Firestore.
+      const newHash = await sha256Hex(n1);
+      await setStoredAdminPasswordHash(newHash);
+      setOkMsg("Пароль изменён");
+      setCur(""); setN1(""); setN2("");
+    } catch(e) {
+      console.error("change password failed", e);
+      setErr(e && e.message ? e.message : "Не удалось сменить пароль");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const inputStyle = {width:"100%", padding:"12px 14px", borderRadius:12, border:"1.5px solid #D1D5DB", fontSize:16, outline:"none", background:"#fff", boxSizing:"border-box"};
+
+  return (
+    <div style={base}>
+      <div style={{...W, display:"flex", alignItems:"center", marginBottom:18}}>
+        <button onClick={onBack} style={{height:36, padding:"0 14px", borderRadius:9, background:"transparent", color:"#6B7280", fontSize:14, border:"1.5px solid #D1D5DB", cursor:"pointer"}}>← Назад</button>
+        <div style={{flex:1, textAlign:"center", fontSize:16, fontWeight:700, color:"#1F2937"}}>Настройки</div>
+        <div style={{width:80}} />
+      </div>
+
+      <div style={{...W, background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:16, padding:"16px"}}>
+        <div style={{fontSize:14, fontWeight:700, color:"#374151", marginBottom:12}}>Смена пароля админа</div>
+        <div style={{marginBottom:10}}>
+          <div style={{fontSize:12, color:"#6B7280", marginBottom:5}}>Текущий пароль</div>
+          <input type="password" value={cur} onChange={e=>setCur(e.target.value)} style={inputStyle} />
+        </div>
+        <div style={{marginBottom:10}}>
+          <div style={{fontSize:12, color:"#6B7280", marginBottom:5}}>Новый пароль (минимум 8 символов)</div>
+          <input type="password" value={n1} onChange={e=>setN1(e.target.value)} style={inputStyle} />
+        </div>
+        <div style={{marginBottom:12}}>
+          <div style={{fontSize:12, color:"#6B7280", marginBottom:5}}>Подтвердите новый пароль</div>
+          <input type="password" value={n2} onChange={e=>setN2(e.target.value)} style={inputStyle} />
+        </div>
+        {err && <div style={{fontSize:13, color:RD, marginBottom:10}}>{err}</div>}
+        {okMsg && <div style={{fontSize:13, color:GR, marginBottom:10}}>{okMsg}</div>}
+        <button onClick={submit} disabled={busy}
+          style={{width:"100%", height:44, borderRadius:12, background:PU, color:"#fff", fontSize:15, fontWeight:600, border:"none", cursor: busy?"default":"pointer", opacity: busy?0.6:1}}>
+          {busy ? "Сохраняем…" : "Изменить пароль"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function AdminApp({ user, profile, onLogout }) {
   const [users, setUsers] = useState([]);
   const [allSessions, setAllSessions] = useState([]);
@@ -2235,6 +2528,21 @@ function AdminApp({ user, profile, onLogout }) {
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState(null);
   const [selectedData, setSelectedData] = useState(null);
+  const [showSettings, setShowSettings] = useState(false);
+
+  // Регистрационный график: период
+  const [regPeriod, setRegPeriod] = useState("week"); // week|month|quarter|custom
+  const [customFrom, setCustomFrom] = useState("");
+  const [customTo, setCustomTo] = useState("");
+
+  // Список игроков: поиск/фильтры/сортировка/пагинация
+  const [search, setSearch] = useState("");
+  const [roleFilter, setRoleFilter] = useState("all"); // all|child|parent
+  const [regFilter, setRegFilter] = useState("all");   // all|day|week|month
+  const [sortKey, setSortKey] = useState("lastLogin");
+  const [sortDir, setSortDir] = useState("desc");
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 50;
 
   useEffect(() => {
     (async () => {
@@ -2261,7 +2569,6 @@ function AdminApp({ user, profile, onLogout }) {
           });
         } catch(e) {}
       }
-      list.sort((a, b) => (b.lastActive || 0) - (a.lastActive || 0));
       setUsers(list);
       setAllSessions(sessAll);
       setAllFacts(factsAggr);
@@ -2276,6 +2583,8 @@ function AdminApp({ user, profile, onLogout }) {
     setSelectedData(data);
   };
 
+  if (showSettings) return <AdminSettings onBack={() => setShowSettings(false)} />;
+
   if (selected && selectedData) {
     return <StatsView name={selected.name + " · " + (selected.role || "?")} facts={selectedData.facts} sessions={selectedData.sessions}
       profile={selectedData.profile} onBack={() => { setSelected(null); setSelectedData(null); }} />;
@@ -2288,10 +2597,34 @@ function AdminApp({ user, profile, onLogout }) {
   const totalQ = allSessions.reduce((s,x) => s+(x.total||0), 0);
   const totalC = allSessions.reduce((s,x) => s+(x.correct||0), 0);
   const acc = totalQ ? Math.round(totalC/totalQ*100) : 0;
+  const now = Date.now();
+
+  const roleCounts = countByRole(users);
+  const active7d = countActiveSince(users, 7*86400000, now);
+  const active30d = countActiveSince(users, 30*86400000, now);
+
+  // Регистрации
+  const reg1d = countRegistrationsSince(users, 86400000, now);
+  const reg7d = countRegistrationsSince(users, 7*86400000, now);
+  const reg30d = countRegistrationsSince(users, 30*86400000, now);
+  const regChildren30 = countRegistrationsSince(users, 30*86400000, now, "child");
+  const regParents30 = countRegistrationsSince(users, 30*86400000, now, "parent");
+
+  // График регистраций по периоду
+  let regChartStart, regChartEnd = now;
+  if (regPeriod === "custom" && customFrom && customTo) {
+    regChartStart = new Date(customFrom).getTime();
+    regChartEnd = new Date(customTo + "T23:59:59").getTime();
+  } else {
+    const periodDays = regPeriod === "month" ? 30 : regPeriod === "quarter" ? 90 : 7;
+    regChartStart = now - periodDays * 86400000;
+  }
+  const regBuckets = groupRegistrationsByDay(users, regChartStart, regChartEnd);
+  const regKeys = Object.keys(regBuckets).sort();
+  const regMax = Math.max(1, ...Object.values(regBuckets));
 
   // Активность по дням (последние 14 дней)
   const days = {};
-  const now = Date.now();
   for (let i = 13; i >= 0; i--) {
     const d = new Date(now - i*86400000);
     const key = d.toISOString().slice(0,10);
@@ -2310,28 +2643,113 @@ function AdminApp({ user, profile, onLogout }) {
     .sort((a,b) => a[1].c/(a[1].c+a[1].w) - b[1].c/(b[1].c+b[1].w))
     .slice(0, 6);
 
+  // Применение фильтров/поиска/сортировки/пагинации к списку игроков
+  const regPeriodMs = regFilter === "all" ? null : ADMIN_PERIOD_MS[regFilter];
+  const filtered = filterUsers(users, { search, role: roleFilter, registeredSinceMs: regPeriodMs, now });
+  const sorted = sortUsers(filtered, sortKey, sortDir);
+  const pageData = paginate(sorted, page, PAGE_SIZE);
+
+  const toggleSort = (k) => {
+    if (sortKey === k) setSortDir(sortDir === "asc" ? "desc" : "asc");
+    else { setSortKey(k); setSortDir(k === "name" || k === "role" ? "asc" : "desc"); }
+    setPage(1);
+  };
+  const arrow = (k) => sortKey === k ? (sortDir === "asc" ? " ↑" : " ↓") : "";
+
+  const card = (label, value) => (
+    <div key={label} style={{background:"#fff", borderRadius:12, padding:"12px 4px", textAlign:"center", border:"1.5px solid #E5E7EB"}}>
+      <div style={{fontSize:10, color:"#6B7280", marginBottom:4}}>{label}</div>
+      <div style={{fontSize:18, fontWeight:800, color:"#1F2937"}}>{value}</div>
+    </div>
+  );
+
+  const periodBtn = (id, label) => (
+    <button key={id} onClick={() => setRegPeriod(id)}
+      style={{flex:1, padding:"7px 6px", borderRadius:8, border:"1.5px solid "+(regPeriod===id?PU:"#D1D5DB"),
+              background: regPeriod===id?PU:"#fff", color: regPeriod===id?"#fff":"#6B7280",
+              fontSize:12, fontWeight:600, cursor:"pointer"}}>{label}</button>
+  );
+
   return (
     <div style={base}>
-      <Header name={profile.name} badge="Администратор" onLogout={onLogout} />
+      <Header name={profile.name} badge="Администратор" onLogout={onLogout} onSettings={() => setShowSettings(true)} />
 
       {loading ? (
         <div style={{...W, textAlign:"center", padding:24, color:"#9CA3AF"}}>Загрузка…</div>
       ) : (
         <>
-          <div style={{...W, display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr", gap:7, marginBottom:18}}>
-            {[
-              ["Игроков", users.length],
-              ["Сессий", totalSessions],
-              ["Вопросов", totalQ],
-              ["Точность", `${acc}%`]
-            ].map(([l,v]) => (
-              <div key={l} style={{background:"#fff", borderRadius:12, padding:"12px 4px", textAlign:"center", border:"1.5px solid #E5E7EB"}}>
-                <div style={{fontSize:10, color:"#6B7280", marginBottom:4}}>{l}</div>
-                <div style={{fontSize:18, fontWeight:800, color:"#1F2937"}}>{v}</div>
-              </div>
-            ))}
+          {/* Блок Аккаунты */}
+          <div style={{...W, marginBottom:6, fontSize:12, color:"#6B7280", textTransform:"uppercase", letterSpacing:0.5}}>Аккаунты</div>
+          <div style={{...W, display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr", gap:7, marginBottom:14}}>
+            {card("Дети", roleCounts.child)}
+            {card("Родители", roleCounts.parent)}
+            {card("Активны 7д", active7d)}
+            {card("Активны 30д", active30d)}
           </div>
 
+          {/* Общая активность */}
+          <div style={{...W, display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr", gap:7, marginBottom:18}}>
+            {card("Всего", users.length)}
+            {card("Сессий", totalSessions)}
+            {card("Вопросов", totalQ)}
+            {card("Точность", `${acc}%`)}
+          </div>
+
+          {/* Блок Новые регистрации */}
+          <div style={{...W, background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:16, padding:"14px", marginBottom:16}}>
+            <div style={{fontSize:13, fontWeight:700, marginBottom:10, color:"#374151"}}>Новые регистрации</div>
+            <div style={{display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:7, marginBottom:12}}>
+              <div style={{textAlign:"center", padding:"8px 4px", background:"#F5F3FF", borderRadius:9}}>
+                <div style={{fontSize:10, color:"#6B7280"}}>За сутки</div>
+                <div style={{fontSize:18, fontWeight:800, color:"#1F2937"}}>{reg1d}</div>
+              </div>
+              <div style={{textAlign:"center", padding:"8px 4px", background:"#F5F3FF", borderRadius:9}}>
+                <div style={{fontSize:10, color:"#6B7280"}}>За 7 дней</div>
+                <div style={{fontSize:18, fontWeight:800, color:"#1F2937"}}>{reg7d}</div>
+              </div>
+              <div style={{textAlign:"center", padding:"8px 4px", background:"#F5F3FF", borderRadius:9}}>
+                <div style={{fontSize:10, color:"#6B7280"}}>За 30 дней</div>
+                <div style={{fontSize:18, fontWeight:800, color:"#1F2937"}}>{reg30d}</div>
+              </div>
+            </div>
+            <div style={{display:"flex", gap:10, fontSize:11, color:"#6B7280", marginBottom:10}}>
+              <span>детских за 30д: <b style={{color:"#1F2937"}}>{regChildren30}</b></span>
+              <span>родительских за 30д: <b style={{color:"#1F2937"}}>{regParents30}</b></span>
+            </div>
+
+            <div style={{display:"flex", gap:5, marginBottom:10}}>
+              {periodBtn("week","7 дней")}
+              {periodBtn("month","30 дней")}
+              {periodBtn("quarter","90 дней")}
+              {periodBtn("custom","Свой")}
+            </div>
+            {regPeriod === "custom" && (
+              <div style={{display:"flex", gap:6, marginBottom:10}}>
+                <input type="date" value={customFrom} onChange={e=>setCustomFrom(e.target.value)}
+                  style={{flex:1, padding:"7px 9px", border:"1.5px solid #D1D5DB", borderRadius:8, fontSize:13}} />
+                <input type="date" value={customTo} onChange={e=>setCustomTo(e.target.value)}
+                  style={{flex:1, padding:"7px 9px", border:"1.5px solid #D1D5DB", borderRadius:8, fontSize:13}} />
+              </div>
+            )}
+
+            <div style={{display:"flex", alignItems:"flex-end", gap:2, height:80}}>
+              {regKeys.map(k => {
+                const v = regBuckets[k];
+                const h = Math.max(2, Math.round(v/regMax*70));
+                return (
+                  <div key={k} style={{flex:1, width:"100%", height:h, background: v ? GR : "#E5E7EB", borderRadius:3, transition:"height 0.3s"}} title={`${k}: ${v} регистраций`} />
+                );
+              })}
+            </div>
+            {regKeys.length > 0 && (
+              <div style={{display:"flex", justifyContent:"space-between", fontSize:9, color:"#9CA3AF", marginTop:4}}>
+                <span>{fmtDay(regChartStart)}</span>
+                <span>{fmtDay(regChartEnd)}</span>
+              </div>
+            )}
+          </div>
+
+          {/* Активность по дням */}
           <div style={{...W, background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:16, padding:"14px", marginBottom:16}}>
             <div style={{fontSize:13, fontWeight:700, marginBottom:10, color:"#374151"}}>Активность за 14 дней</div>
             <div style={{display:"flex", alignItems:"flex-end", gap:3, height:80}}>
@@ -2368,24 +2786,82 @@ function AdminApp({ user, profile, onLogout }) {
             </div>
           )}
 
-          <div style={{...W, marginBottom:10, fontSize:13, color:"#6B7280"}}>Все игроки</div>
+          {/* Список игроков с поиском/фильтрами/сортировкой */}
+          <div style={{...W, marginBottom:10, fontSize:13, color:"#6B7280"}}>
+            Все игроки ({pageData.total}{pageData.total !== users.length ? ` из ${users.length}` : ""})
+          </div>
+
+          <div style={{...W, display:"flex", flexDirection:"column", gap:6, marginBottom:10}}>
+            <input value={search} onChange={e=>{setSearch(e.target.value); setPage(1);}} placeholder="🔍 Поиск по имени"
+              style={{padding:"9px 12px", border:"1.5px solid #D1D5DB", borderRadius:9, fontSize:14, outline:"none"}} />
+            <div style={{display:"flex", gap:6}}>
+              <select value={roleFilter} onChange={e=>{setRoleFilter(e.target.value); setPage(1);}}
+                style={{flex:1, padding:"7px 8px", border:"1.5px solid #D1D5DB", borderRadius:8, fontSize:13, background:"#fff"}}>
+                <option value="all">Все роли</option>
+                <option value="child">Только дети</option>
+                <option value="parent">Только родители</option>
+                <option value="admin">Только админы</option>
+              </select>
+              <select value={regFilter} onChange={e=>{setRegFilter(e.target.value); setPage(1);}}
+                style={{flex:1, padding:"7px 8px", border:"1.5px solid #D1D5DB", borderRadius:8, fontSize:13, background:"#fff"}}>
+                <option value="all">За всё время</option>
+                <option value="day">Регистрация за сутки</option>
+                <option value="week">за неделю</option>
+                <option value="month">за месяц</option>
+              </select>
+            </div>
+            <div style={{display:"flex", gap:5, fontSize:11, flexWrap:"wrap"}}>
+              {[
+                ["name","Имя"], ["role","Роль"], ["createdAt","Регистрация"],
+                ["lastLogin","Последний вход"], ["sessionsCount","Сессий"], ["lastActive","Активность"]
+              ].map(([k,l]) => (
+                <button key={k} onClick={()=>toggleSort(k)}
+                  style={{padding:"4px 8px", borderRadius:7, border:"1px solid "+(sortKey===k?PU:"#D1D5DB"),
+                          background: sortKey===k ? "#EEEDFE":"#fff", color: sortKey===k ? PU:"#6B7280",
+                          fontSize:11, cursor:"pointer"}}>
+                  {l}{arrow(k)}
+                </button>
+              ))}
+            </div>
+          </div>
+
           <div style={{...W, display:"flex", flexDirection:"column", gap:7}}>
-            {users.map(u => (
+            {pageData.items.map(u => (
               <button key={u.uid} onClick={() => openUser(u)}
                 style={{display:"flex", alignItems:"center", justifyContent:"space-between", padding:"12px 14px", background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:12, cursor:"pointer", textAlign:"left"}}>
-                <div>
+                <div style={{flex:1, minWidth:0}}>
                   <div style={{fontSize:15, fontWeight:700, color:"#1F2937"}}>
                     {u.name} <span style={{fontSize:11, color:"#9CA3AF", fontWeight:400}}>· {u.role}</span>
                   </div>
                   <div style={{fontSize:11, color:"#9CA3AF"}}>
-                    {u.lastActive ? `активен ${fmtD(u.lastActive)}` : "нет активности"}
-                    {u.sessionsCount ? ` · ${u.sessionsCount} сессий` : ""}
+                    {u.createdAt ? `рег. ${fmtDay(u.createdAt)}` : "рег. ?"}
+                    {" · "}
+                    {u.lastLogin ? `вход ${fmtD(u.lastLogin)}` : "вход не зафиксирован"}
+                  </div>
+                  <div style={{fontSize:11, color:"#9CA3AF"}}>
+                    {u.sessionsCount ? `${u.sessionsCount} сессий` : "нет сессий"}
+                    {u.lastActive ? ` · акт. ${fmtD(u.lastActive)}` : ""}
                   </div>
                 </div>
                 <div style={{fontSize:18, color:"#9CA3AF"}}>›</div>
               </button>
             ))}
+            {pageData.items.length === 0 && (
+              <div style={{padding:"22px 10px", textAlign:"center", color:"#9CA3AF", fontSize:13}}>
+                Ничего не найдено
+              </div>
+            )}
           </div>
+
+          {pageData.totalPages > 1 && (
+            <div style={{...W, display:"flex", justifyContent:"center", alignItems:"center", gap:8, marginTop:12}}>
+              <button onClick={()=>setPage(Math.max(1, pageData.page - 1))} disabled={pageData.page === 1}
+                style={{padding:"6px 12px", borderRadius:8, border:"1.5px solid #D1D5DB", background:"#fff", cursor: pageData.page===1?"default":"pointer", opacity: pageData.page===1?0.4:1, fontSize:13}}>← Назад</button>
+              <span style={{fontSize:13, color:"#6B7280"}}>Стр. {pageData.page} из {pageData.totalPages}</span>
+              <button onClick={()=>setPage(Math.min(pageData.totalPages, pageData.page + 1))} disabled={pageData.page === pageData.totalPages}
+                style={{padding:"6px 12px", borderRadius:8, border:"1.5px solid #D1D5DB", background:"#fff", cursor: pageData.page===pageData.totalPages?"default":"pointer", opacity: pageData.page===pageData.totalPages?0.4:1, fontSize:13}}>Вперёд →</button>
+            </div>
+          )}
         </>
       )}
     </div>
