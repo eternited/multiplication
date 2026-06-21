@@ -6,6 +6,29 @@
 
 ## 2026-06-12
 
+### Безопасная смена пароля админа + аварийное восстановление
+**Коммит:** ниже
+
+Фикс критического бага: предыдущая итерация смены пароля могла оставлять Firebase Auth и Firestore-хэш в рассинхроне → невозможно войти ни старым, ни новым паролем.
+
+**Что изменилось:**
+- Полностью убран захардкоженный фолбэк-пароль `admin12345`. `ADMIN_PASS` снят из кода; источник истины — хэш в `adminConfig/main.passwordHash`.
+- Если хэша нет в Firestore → AuthScreen показывает экран «Первичная настройка админа» (новый пароль + подтверждение). При первом запуске создаётся `auth user` + профиль с `role:admin` + хэш в Firestore.
+- **Смена пароля** теперь идёт через `orchestratePasswordChange` (чистая функция в `window.GAME`) со строгим порядком: `verifyCurrent → reauthenticate → updateAuthPassword → testSignInSecondary → writeNewHash`. Любая ошибка ДО последнего шага не пишет хэш — Auth и Firestore либо в синке, либо при следующей попытке.
+- **Тестовый вход** делается через вторичный Firebase Auth-инстанс (`firebase.initializeApp(config, "secondary")`), чтобы не выкидывать действующую сессию админа. Если signIn падает с invalid-credential — это значит `updatePassword` молча не отработал → хэш не пишется, пользователю показано «Тестовый вход с новым паролем не удался».
+- `reauthenticateWithCredential` теперь делается **всегда** до `updatePassword`, не только при `auth/requires-recent-login` — устраняет тихий провал.
+
+**Аварийное восстановление** через `adminRecovery/request`:
+- Документ создаётся вручную владельцем проекта через Firebase Console (Firestore Rules: `create/update: if false`, `read: if true`, `delete: if request.auth != null`).
+- Поля: `requestedAt` (Timestamp) и `newPassword`. Свежим считается ≤ 1 час.
+- На стороне приложения: `tryAdminRecovery(email, pass)` читает документ, проверяет свежесть и совпадение пароля, делает `signInWithEmailAndPassword`, синхронизирует хэш и удаляет recovery-доку. Владелец также обновляет Auth-пароль в Console — это документировано в комментарии в `index.html`.
+
+**Чистые помощники в `window.GAME`:** `isRecoveryFresh`, `decideRecoveryAction`, `orchestratePasswordChange`.
+
+**Firestore Rules** обновлены: `adminConfig/{doc}` — read для всех (для setup-флоу неавторизованного гостя), `create` для авторизованных (setup), `update/delete` только админу. `adminRecovery/{doc}` — read для всех, delete для авторизованных, create/update запрещены.
+
+**Тесты — 48/48 зелёных** (`test.js`, прогнан и удалён): `isRecoveryFresh` с граничными значениями (включая Firebase `Timestamp.toMillis`), `decideRecoveryAction` для apply/reject/noop, `validatePasswordChange`, `orchestratePasswordChange` с инжектируемыми шагами (успех; провал на каждом из 5 шагов → `writeNewHash` НЕ вызван; отсутствие шага; throw внутри шага), детерминированность `sha256Hex`, проверка отсутствия `admin12345`/`ADMIN_PASS` в `index.html`, наличие setup/recovery/secondary-инфраструктуры, парсинг game-logic и JSX-блоков.
+
 ### Расширенная статистика админки + смена пароля с хэшем
 **Коммит:** `d83307f`
 

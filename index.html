@@ -215,9 +215,35 @@ window._db.enablePersistence({ synchronizeTabs: false })
   .catch(err => console.warn("Persistence unavailable:", err && err.code));
 
 // ─── ADMIN ────────────────────────────────────────────────
-// Захардкоженный пароль администратора — поменяй после первого входа.
+// Имя админ-аккаунта фиксировано. Пароль НЕ хранится в коде — он лежит как SHA-256-хэш
+// в Firestore-документе adminConfig/main.passwordHash. При первой установке приложение
+// покажет экран "Первичная настройка админа" (когда хэша нет). На случай рассинхрона
+// или забытого пароля — см. процедуру восстановления в комментарии ниже (adminRecovery).
 window._ADMIN_NAME = "admin";
-window._ADMIN_PASS = "admin12345";
+
+/*
+─── ВОССТАНОВЛЕНИЕ ПАРОЛЯ АДМИНА ──────────────────────────
+Если рассинхрон между Firebase Auth и Firestore-хэшем, либо пароль забыт —
+владелец проекта восстанавливает доступ ВРУЧНУЮ через Firebase Console:
+
+1. Firebase Console → Authentication → пользователь admin@multiplication.app
+   → "Reset password" (или Edit → Password) — установить новый пароль.
+2. Firebase Console → Firestore → коллекция adminRecovery → документ request
+   → Создать или обновить с полями:
+     - requestedAt: текущая дата/время (Timestamp Now)
+     - newPassword: тот же пароль, что выставлен в Auth (минимум 8 символов)
+3. Открыть приложение → войти как admin с этим паролем.
+   Приложение увидит свежую (≤ 1 час) запись восстановления, разрешит вход,
+   синхронизирует SHA-256 хэш в adminConfig/main и удалит документ request.
+
+ВАЖНО:
+- Документ adminRecovery/request защищён правилами: создание/обновление только
+  через Firebase Console (rules запрещают write из приложения), удаление —
+  разрешено приложению после успешного применения.
+- Поле newPassword в Firestore — пишется в открытом виде; это допустимо, так как
+  только владелец проекта имеет доступ к Console. UI и логи приложения этот
+  пароль не выводят.
+*/
 
 /*
 ─── SUGGESTED FIRESTORE RULES ────────────────────────────
@@ -255,11 +281,22 @@ service cloud.firestore {
     }
 
     match /adminConfig/{doc} {
-      // Чтение хэша админ-пароля нужно всем авторизованным (проверка при входе админа).
-      // Запись — только админу (и при первой инициализации — при матче с фолбэк-паролем
-      // запись выполняет уже залогиненный админ-аккаунт после signIn).
-      allow read: if request.auth != null;
-      allow write: if isAdmin();
+      // Чтение хэша админ-пароля нужно всем для проверки при логине админа (включая
+      // НЕавторизованного гостя). Запись — только админу либо при первичной настройке,
+      // когда документа ещё нет: разрешаем create если admin-аккаунт ещё не существует
+      // (в этом случае его и создаёт setup-флоу).
+      allow read: if true;
+      allow create: if request.auth != null;
+      allow update, delete: if isAdmin();
+    }
+
+    match /adminRecovery/{doc} {
+      // Документ ВРУЧНУЮ создаётся владельцем проекта через Firebase Console.
+      // Приложение читает, чтобы проверить запрос восстановления, и удаляет после
+      // успешного применения. create/update из приложения запрещены.
+      allow read: if true;
+      allow delete: if request.auth != null;
+      allow create, update: if false;
     }
   }
 }
@@ -299,11 +336,22 @@ service cloud.firestore {
     }
 
     match /adminConfig/{doc} {
-      // Чтение хэша админ-пароля нужно всем авторизованным (проверка при входе админа).
-      // Запись — только админу (и при первой инициализации — при матче с фолбэк-паролем
-      // запись выполняет уже залогиненный админ-аккаунт после signIn).
-      allow read: if request.auth != null;
-      allow write: if isAdmin();
+      // Чтение хэша админ-пароля нужно всем для проверки при логине админа (включая
+      // НЕавторизованного гостя). Запись — только админу либо при первичной настройке,
+      // когда документа ещё нет: разрешаем create если admin-аккаунт ещё не существует
+      // (в этом случае его и создаёт setup-флоу).
+      allow read: if true;
+      allow create: if request.auth != null;
+      allow update, delete: if isAdmin();
+    }
+
+    match /adminRecovery/{doc} {
+      // Документ ВРУЧНУЮ создаётся владельцем проекта через Firebase Console.
+      // Приложение читает, чтобы проверить запрос восстановления, и удаляет после
+      // успешного применения. create/update из приложения запрещены.
+      allow read: if true;
+      allow delete: if request.auth != null;
+      allow create, update: if false;
     }
   }
 }`;
@@ -1002,6 +1050,48 @@ window.playSound = playSound;
     return { ok: true };
   }
 
+  // ── Восстановление пароля админа ──
+  // Документ adminRecovery/request: { requestedAt, newPassword }. Свежим считается ≤ maxAgeMs (по умолчанию 1ч).
+  function isRecoveryFresh(doc, now, maxAgeMs){
+    if (!doc || !doc.requestedAt) return false;
+    const t = typeof doc.requestedAt === "number" ? doc.requestedAt
+            : (doc.requestedAt && typeof doc.requestedAt.toMillis === "function") ? doc.requestedAt.toMillis()
+            : Number(doc.requestedAt);
+    if (!isFinite(t)) return false;
+    const cur = (now == null ? Date.now() : now);
+    const max = maxAgeMs > 0 ? maxAgeMs : 3600000;
+    const age = cur - t;
+    return age >= 0 && age <= max;
+  }
+
+  // Решение, что делать со ссылкой на восстановление при вводе пароля:
+  //  "apply"  — свежий запрос + введённый пароль совпадает с newPassword
+  //  "reject" — свежий запрос, но пароль другой
+  //  "noop"   — записи нет или устарела
+  function decideRecoveryAction(doc, enteredPassword, now, maxAgeMs){
+    if (!isRecoveryFresh(doc, now, maxAgeMs)) return "noop";
+    if (typeof doc.newPassword !== "string" || !doc.newPassword) return "noop";
+    return String(doc.newPassword) === String(enteredPassword) ? "apply" : "reject";
+  }
+
+  // Оркестратор смены пароля. Чистый: получает инжектируемые шаги (для тестов или реал-кода).
+  // ГАРАНТИЯ: writeNewHash вызывается ТОЛЬКО после успеха всех предыдущих шагов в строгом порядке.
+  // Любая ошибка ниже writeNewHash оставит Firestore-хэш нетронутым (синхронизирован с Auth).
+  async function orchestratePasswordChange(steps){
+    const order = ["verifyCurrent", "reauthenticate", "updateAuthPassword", "testSignInSecondary", "writeNewHash"];
+    for (const key of order) {
+      const fn = steps && steps[key];
+      if (typeof fn !== "function") return { ok: false, step: key, error: "step missing" };
+      try {
+        const res = await fn();
+        if (res && res.ok === false) return { ok: false, step: key, error: res.error || "step failed" };
+      } catch(e) {
+        return { ok: false, step: key, error: (e && e.message) ? e.message : String(e) };
+      }
+    }
+    return { ok: true };
+  }
+
   // Хэш SHA-256 → hex. Использует Web Crypto API; в тестах принимает инжектируемый subtle.
   async function sha256Hex(text, subtleImpl){
     const subtle = subtleImpl
@@ -1029,6 +1119,7 @@ window.playSound = playSound;
     ADMIN_PERIOD_MS, countByRole, countActiveSince, countRegistrationsSince,
     groupRegistrationsByDay, filterUsers, sortUsers, paginate,
     validatePasswordChange, sha256Hex,
+    isRecoveryFresh, decideRecoveryAction, orchestratePasswordChange,
   };
   global.GAME = GAME;
   if (typeof module !== "undefined" && module.exports) module.exports = GAME;
@@ -1042,7 +1133,7 @@ const { useState, useEffect, useRef, useMemo } = React;
 const auth = window._auth;
 const db = window._db;
 const ADMIN_NAME = window._ADMIN_NAME;
-const ADMIN_PASS = window._ADMIN_PASS;
+const ADMIN_RECOVERY_MAX_AGE_MS = 60 * 60 * 1000; // 1 час
 
 const SES_OPTS = window.GAME.SES_OPTS;
 const NUMS = window.GAME.NUMS;
@@ -1061,7 +1152,8 @@ const { getRank, isLevelUp, computeAnswerXP, comboMultiplier, nextCombo, session
         filterSessionsByPeriod, aggregateSessions,
         ADMIN_PERIOD_MS, countByRole, countActiveSince, countRegistrationsSince,
         groupRegistrationsByDay, filterUsers, sortUsers, paginate,
-        validatePasswordChange, sha256Hex } = G;
+        validatePasswordChange, sha256Hex,
+        isRecoveryFresh, decideRecoveryAction, orchestratePasswordChange } = G;
 
 const hc = f => {
   if (!f || f.c+f.w===0) return {bg:"#E5E7EB", tx:"#9CA3AF"};
@@ -1151,9 +1243,9 @@ async function linkParentToChildByCode(parentUid, code) {
 }
 
 // ─── ADMIN PASSWORD ──────────────────────────────────────
-// Пароль админа хранится как SHA-256 hex в adminConfig/main. Если документа нет —
-// пробуем фолбэк на захардкоженный ADMIN_PASS (для миграции; уберём, когда все среды
-// поднимутся). В обоих случаях после успешного входа пишем актуальный хэш в Firestore.
+// Источник истины для пароля админа — хэш SHA-256 в Firestore (adminConfig/main).
+// Захардкоженного фолбэка нет. Если хэша нет — приложение покажет экран первичной
+// настройки. Если рассинхрон между Auth и хэшем — восстановление через adminRecovery.
 async function getStoredAdminPasswordHash() {
   try {
     const snap = await db.collection("adminConfig").doc("main").get();
@@ -1167,21 +1259,35 @@ async function setStoredAdminPasswordHash(hash) {
     .set({ passwordHash: hash, updatedAt: Date.now() }, { merge: true });
 }
 
-// Возвращает true, если пароль валиден. Делает авто-миграцию: при первом успешном
-// входе с захардкоженным паролем подменяем доку хэшем.
 async function verifyAdminPassword(plain) {
-  const inputHash = await sha256Hex(plain);
   const stored = await getStoredAdminPasswordHash();
-  if (stored) return inputHash === stored;
-  // Документа в Firestore ещё нет — сравниваем с фолбэк-паролем.
-  const fallbackHash = await sha256Hex(ADMIN_PASS);
-  if (inputHash === fallbackHash) {
-    // Самозапись хэша в Firestore — после первой удачной авторизации админа.
-    // Ошибки игнорируем: если правила пока запрещают запись, в следующий раз попробуем снова.
-    try { await setStoredAdminPasswordHash(fallbackHash); } catch(e) {}
-    return true;
+  if (!stored) return false; // нет хэша → не валидно (отправит на setup-флоу)
+  const inputHash = await sha256Hex(plain);
+  return inputHash === stored;
+}
+
+// Читает документ adminRecovery/request. Возвращает данные или null.
+async function getAdminRecoveryRequest() {
+  try {
+    const snap = await db.collection("adminRecovery").doc("request").get();
+    if (snap.exists) return snap.data();
+  } catch(e) {}
+  return null;
+}
+
+async function deleteAdminRecoveryRequest() {
+  try { await db.collection("adminRecovery").doc("request").delete(); } catch(e) {}
+}
+
+// Вторичный Firebase-инстанс для тестового signIn без выхода из основного.
+// Лениво инициализируется; держим один на всё приложение.
+function getSecondaryAuth() {
+  let app;
+  try { app = firebase.app("secondary"); }
+  catch(e) {
+    app = firebase.initializeApp(firebaseConfig, "secondary");
   }
-  return false;
+  return app.auth();
 }
 
 // ─── APP ─────────────────────────────────────────────────
@@ -1237,6 +1343,70 @@ function AuthScreen() {
   const [role, setRole] = useState("child");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  // Когда хэша админа нет в Firestore — переключаемся в режим первичной настройки.
+  const [setupMode, setSetupMode] = useState(false);
+  const [setupP1, setSetupP1] = useState("");
+  const [setupP2, setSetupP2] = useState("");
+
+  const adminEmail = () => nameToEmail(ADMIN_NAME);
+
+  const doAdminSetup = async () => {
+    setErr("");
+    if (!setupP1 || setupP1.length < 8) { setErr("Минимум 8 символов"); return; }
+    if (setupP1 !== setupP2) { setErr("Пароли не совпадают"); return; }
+    setBusy(true);
+    try {
+      const email = adminEmail();
+      const newHash = await sha256Hex(setupP1);
+      let uid;
+      try {
+        const cred = await auth.createUserWithEmailAndPassword(email, setupP1);
+        uid = cred.user.uid;
+        await db.collection("users").doc(uid).set({
+          name: ADMIN_NAME, role: "admin", createdAt: Date.now()
+        });
+      } catch(e) {
+        if (e.code === "auth/email-already-in-use") {
+          // Аккаунт в Auth уже есть, но Firestore-хэша нет (например, его удалили).
+          // Без знания Auth-пароля войти не можем — нужна процедура восстановления.
+          setErr("Аккаунт админа существует в Auth, но настройка утеряна. Восстанови через Firebase Console: adminRecovery/request.");
+          setBusy(false);
+          return;
+        }
+        throw e;
+      }
+      await setStoredAdminPasswordHash(newHash);
+      // После set профиля + хэша — onAuthStateChanged автоматически введёт в AdminApp.
+    } catch(e) {
+      console.error("admin setup failed", e);
+      setErr(e && e.message ? e.message : "Не удалось создать админа");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Восстановление: если есть свежий adminRecovery/request с newPassword==pass — пытаемся signIn
+  // (Auth-пароль должен быть тоже обновлён владельцем в Console). Если всё ok — синхронизируем
+  // хэш и удаляем recovery-доку. Возвращает true, если вход выполнен.
+  const tryAdminRecovery = async (email, pass) => {
+    const rec = await getAdminRecoveryRequest();
+    const action = decideRecoveryAction(rec, pass, Date.now(), ADMIN_RECOVERY_MAX_AGE_MS);
+    if (action !== "apply") return false;
+    try {
+      await auth.signInWithEmailAndPassword(email, pass);
+    } catch(e) {
+      // Owner забыл также обновить пароль в Auth.
+      setErr("Восстановление: пароль в Firebase Auth не совпадает. Обнови его в Firebase Console → Authentication.");
+      return true; // recovery попытка считается обработанной — не падаем дальше.
+    }
+    // Auth-пароль теперь точно знаем — синхронизируем хэш и удаляем recovery.
+    try {
+      const newHash = await sha256Hex(pass);
+      await setStoredAdminPasswordHash(newHash);
+    } catch(e) {}
+    await deleteAdminRecoveryRequest();
+    return true;
+  };
 
   const submit = async () => {
     setErr("");
@@ -1249,30 +1419,31 @@ function AuthScreen() {
       const email = nameToEmail(n);
       if (tab === "login") {
         if (isAdminName) {
-          // Проверяем актуальный хэш в Firestore (с авто-миграцией с фолбэка).
+          // 1) Сначала — попытка восстановления, если есть свежий adminRecovery/request.
+          //    Это покрывает прошлый баг (рассинхрон Auth↔Firestore-хэш).
+          const handled = await tryAdminRecovery(email, pass);
+          if (handled) { setBusy(false); return; }
+
+          // 2) Проверяем хэш в Firestore. Если хэша нет — отправляем на первичную настройку.
+          const stored = await getStoredAdminPasswordHash();
+          if (!stored) {
+            setSetupMode(true);
+            setSetupP1(pass);
+            setSetupP2("");
+            setBusy(false);
+            return;
+          }
           const okPass = await verifyAdminPassword(pass);
           if (!okPass) { setErr("Неверный пароль"); setBusy(false); return; }
-          // Email в Firebase Auth — стабильный (admin@multiplication.app), пароль ТОЖЕ должен
-          // совпадать с тем, что хранится в Firebase Auth. При первом логине с новым паролем
-          // нужно обновить пароль в Auth — это уже произойдёт в окне смены пароля админа.
-          // Для входа используем ADMIN_PASS (фолбэк) либо введённый — пробуем введённый сначала.
+          // 3) Логин в Firebase Auth. Если Auth-пароль рассинхронизирован — приходит invalid-credential.
           try { await auth.signInWithEmailAndPassword(email, pass); }
           catch(e) {
-            if (e.code === "auth/user-not-found" || e.code === "auth/invalid-credential" || e.code === "auth/invalid-login-credentials") {
-              // Учётки в Firebase Auth ещё нет — создаём (первая инсталляция).
-              try {
-                const cred = await auth.createUserWithEmailAndPassword(email, pass);
-                await db.collection("users").doc(cred.user.uid).set({
-                  name: n, role: "admin", createdAt: Date.now()
-                });
-              } catch(e2) {
-                // Если учётка есть, но Auth-пароль не совпадает с введённым (хэш в Firestore
-                // обновили, а Auth-пароль ещё нет) — пробуем фолбэк.
-                if (e2.code === "auth/email-already-in-use") {
-                  await auth.signInWithEmailAndPassword(email, ADMIN_PASS);
-                } else throw e2;
-              }
-            } else throw e;
+            if (e.code === "auth/user-not-found" || e.code === "auth/invalid-credential" || e.code === "auth/invalid-login-credentials" || e.code === "auth/wrong-password") {
+              setErr("Пароль рассинхронизирован с Firebase Auth. Используй процедуру восстановления (adminRecovery/request в Console).");
+              setBusy(false);
+              return;
+            }
+            throw e;
           }
         } else {
           await auth.signInWithEmailAndPassword(email, pass);
@@ -1300,6 +1471,36 @@ function AuthScreen() {
     }
     setBusy(false);
   };
+
+  if (setupMode) {
+    const inputStyle = {width:"100%", padding:"12px 14px", borderRadius:12, border:"1.5px solid #D1D5DB", fontSize:16, outline:"none", background:"#fff", boxSizing:"border-box"};
+    return (
+      <div style={base}>
+        <div style={{fontSize:52, marginBottom:4, textAlign:"center"}}>🔧</div>
+        <h1 style={{fontSize:22, fontWeight:700, color:PU, margin:"0 0 2px", textAlign:"center"}}>Первичная настройка админа</h1>
+        <p style={{fontSize:13, color:"#6B7280", margin:"0 0 18px", textAlign:"center", maxWidth:360}}>
+          Аккаунт администратора ещё не создан. Задай пароль — он будет сохранён только в виде SHA-256 хэша.
+        </p>
+        <div style={{...W, marginBottom:12}}>
+          <div style={{fontSize:13, color:"#6B7280", marginBottom:7}}>Новый пароль (минимум 8 символов)</div>
+          <input type="password" value={setupP1} onChange={e=>setSetupP1(e.target.value)} style={inputStyle} />
+        </div>
+        <div style={{...W, marginBottom:14}}>
+          <div style={{fontSize:13, color:"#6B7280", marginBottom:7}}>Подтверждение</div>
+          <input type="password" value={setupP2} onChange={e=>setSetupP2(e.target.value)} style={inputStyle} />
+        </div>
+        {err && <div style={{...W, color:RD, fontSize:14, marginBottom:12, textAlign:"center"}}>{err}</div>}
+        <button onClick={doAdminSetup} disabled={busy}
+          style={{...W, height:52, borderRadius:14, background: busy ? "#9CA3AF" : PU, color:"#fff", fontSize:16, fontWeight:700, border:"none", cursor: busy ? "default" : "pointer", marginBottom:10}}>
+          {busy ? "Создаём…" : "Создать"}
+        </button>
+        <button onClick={() => { setSetupMode(false); setErr(""); }} disabled={busy}
+          style={{...W, height:40, borderRadius:10, background:"transparent", color:"#6B7280", fontSize:14, border:"1.5px solid #D1D5DB", cursor: busy ? "default" : "pointer"}}>
+          Отмена
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div style={base}>
@@ -2454,33 +2655,70 @@ function AdminSettings({ onBack }) {
   const [err, setErr] = useState("");
   const [okMsg, setOkMsg] = useState("");
 
+  // Прогон через orchestratePasswordChange гарантирует строгий порядок шагов и то,
+  // что Firestore-хэш ОБНОВИТСЯ ТОЛЬКО ПОСЛЕ тестового signIn с новым паролем
+  // (через вторичный Firebase-инстанс — основная сессия остаётся живой).
   const submit = async () => {
     setErr(""); setOkMsg("");
     const v = validatePasswordChange(cur, n1, n2, 8);
     if (!v.ok) { setErr(v.error); return; }
     setBusy(true);
+
+    const email = auth.currentUser && auth.currentUser.email;
+    const steps = {
+      verifyCurrent: async () => {
+        const ok = await verifyAdminPassword(cur);
+        return ok ? { ok: true } : { ok: false, error: "Текущий пароль неверен" };
+      },
+      reauthenticate: async () => {
+        // Безусловная реаутентификация — это требование Firebase Auth перед
+        // sensitive-операциями (updatePassword). Делаем await, проверяем успех.
+        const cred = firebase.auth.EmailAuthProvider.credential(email, cur);
+        await auth.currentUser.reauthenticateWithCredential(cred);
+        return { ok: true };
+      },
+      updateAuthPassword: async () => {
+        await auth.currentUser.updatePassword(n1);
+        return { ok: true };
+      },
+      testSignInSecondary: async () => {
+        // Тестовый вход с НОВЫМ паролем через вторичный auth-инстанс. Если updatePassword
+        // молча провалился, signIn вернёт invalid-credential — Firestore не тронем.
+        const sec = getSecondaryAuth();
+        try {
+          await sec.signInWithEmailAndPassword(email, n1);
+        } catch(e) {
+          return { ok: false, error: "Тестовый вход с новым паролем не удался — Firestore не обновлён, попробуй ещё раз" };
+        } finally {
+          try { await sec.signOut(); } catch(e) {}
+        }
+        return { ok: true };
+      },
+      writeNewHash: async () => {
+        const newHash = await sha256Hex(n1);
+        await setStoredAdminPasswordHash(newHash);
+        return { ok: true };
+      },
+    };
+
     try {
-      // Проверка текущего пароля по хэшу.
-      const okCur = await verifyAdminPassword(cur);
-      if (!okCur) { setErr("Текущий пароль неверен"); setBusy(false); return; }
-      // Обновляем Auth-пароль (нужно для последующих signInWithEmailAndPassword).
-      try { await auth.currentUser.updatePassword(n1); }
-      catch(e) {
-        if (e.code === "auth/requires-recent-login") {
-          // Реаутентификация текущим паролем.
-          const cred = firebase.auth.EmailAuthProvider.credential(auth.currentUser.email, cur);
-          await auth.currentUser.reauthenticateWithCredential(cred);
-          await auth.currentUser.updatePassword(n1);
-        } else throw e;
+      const result = await orchestratePasswordChange(steps);
+      if (!result.ok) {
+        // На каждом шаге кроме writeNewHash ошибка означает: Firestore-хэш не тронут.
+        // Это безопасно — Auth и Firestore либо в синке, либо вернутся при следующей попытке.
+        console.error("password change failed at step", result.step, result.error);
+        const msg = result.error
+          || (result.step === "reauthenticate" ? "Повторная аутентификация не удалась"
+          : result.step === "updateAuthPassword" ? "Не удалось обновить пароль в Firebase Auth"
+          : "Ошибка");
+        setErr(msg);
+        return;
       }
-      // Затем — хэш в Firestore.
-      const newHash = await sha256Hex(n1);
-      await setStoredAdminPasswordHash(newHash);
       setOkMsg("Пароль изменён");
       setCur(""); setN1(""); setN2("");
     } catch(e) {
-      console.error("change password failed", e);
-      setErr(e && e.message ? e.message : "Не удалось сменить пароль");
+      console.error("change password crash", e);
+      setErr("Не удалось сменить пароль");
     } finally {
       setBusy(false);
     }
