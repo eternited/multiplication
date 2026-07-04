@@ -207,7 +207,14 @@ firebase.initializeApp(firebaseConfig);
 window._auth = firebase.auth();
 window._db = firebase.firestore();
 
-// Офлайн-режим: локальный кэш в IndexedDB. Должно стоять ДО любых запросов
+// Auth-токен живёт в IndexedDB и восстанавливается БЕЗ сети при следующем запуске.
+// LOCAL — compat-эквивалент browserLocalPersistence из модульного SDK. Это и так
+// дефолт, но фиксируем явно: офлайн-релогин зависит от этого режима.
+window._auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL)
+  .catch(err => console.warn("Auth persistence unavailable:", err && err.code));
+
+// Офлайн-режим Firestore: локальный кэш в IndexedDB (compat-эквивалент
+// enableIndexedDbPersistence). Должно стоять ДО любых запросов
 // (т.е. до onAuthStateChanged и до Firestore-обращений в коде ниже).
 // При офлайн-старте уже авторизованный пользователь получит данные из кэша,
 // записи будут синхронизироваться при появлении сети.
@@ -1320,6 +1327,16 @@ function App() {
     return () => unsub();
   }, []);
 
+  // Страховка от вечной "Загрузки…": если Firebase за 3с не отдал auth-состояние
+  // (нет сети И нет локального токена) — показываем форму входа. Если колбэк
+  // onAuthStateChanged всё же придёт позже, он перезапишет состояние корректным.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setAuthState(s => (s === "loading" ? "guest" : s));
+    }, 3000);
+    return () => clearTimeout(t);
+  }, []);
+
   const logout = () => auth.signOut();
 
   if (authState === "loading") return (
@@ -1347,6 +1364,14 @@ function AuthScreen() {
   const [setupMode, setSetupMode] = useState(false);
   const [setupP1, setSetupP1] = useState("");
   const [setupP2, setSetupP2] = useState("");
+  // Индикатор сети: первый вход/регистрация без интернета невозможны — предупреждаем.
+  const [online, setOnline] = useState(typeof navigator === "undefined" ? true : navigator.onLine);
+  useEffect(() => {
+    const on = () => setOnline(true), off = () => setOnline(false);
+    window.addEventListener("online", on);
+    window.addEventListener("offline", off);
+    return () => { window.removeEventListener("online", on); window.removeEventListener("offline", off); };
+  }, []);
 
   const adminEmail = () => nameToEmail(ADMIN_NAME);
 
@@ -1507,6 +1532,12 @@ function AuthScreen() {
       <div style={{fontSize:52, marginBottom:4, textAlign:"center"}}>✖️</div>
       <h1 style={{fontSize:26, fontWeight:700, color:PU, margin:"0 0 2px", textAlign:"center"}}>Таблица умножения</h1>
       <p style={{fontSize:14, color:"#6B7280", margin:"0 0 24px"}}>Умная тренировка</p>
+
+      {!online && (
+        <div style={{...W, background:"#FFFBEB", border:"1.5px solid #FCD34D", borderRadius:12, padding:"10px 14px", marginBottom:14, fontSize:13, color:"#92400E", textAlign:"center"}}>
+          📡 Нет сети. Для первого входа требуется интернет — если ты уже заходил раньше, приложение откроется само.
+        </div>
+      )}
 
       <div style={{...W, display:"flex", marginBottom:18, background:"#fff", borderRadius:12, padding:4, border:"1.5px solid #E5E7EB"}}>
         {["login","register"].map(t => (

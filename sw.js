@@ -1,5 +1,9 @@
-const CACHE = 'multiply-v3';
+// Версию кэша поднимаем при каждом изменении списка ресурсов или стратегии —
+// activate удалит старые кэши.
+const CACHE = 'multiply-v4';
 
+// Локальная статика (app shell). sw.js сам себя НЕ кэширует — браузер хранит
+// скрипт SW отдельно, запросы на его обновление идут мимо fetch-обработчика.
 const STATIC = [
   '.',
   './index.html',
@@ -8,7 +12,18 @@ const STATIC = [
   './icons/icon-512.png'
 ];
 
-// Все 90 аудиофайлов
+// CDN-скрипты, без которых приложение не стартует. Список должен В ТОЧНОСТИ
+// совпадать с <script src> в index.html — автотест сверяет их автоматически.
+const CDN = [
+  'https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js',
+  'https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js',
+  'https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js',
+  'https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js',
+  'https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js',
+  'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js'
+];
+
+// Все 90 аудиофайлов озвучки
 const AUDIO = [];
 for (let a = 2; a <= 10; a++) {
   for (let b = 1; b <= 10; b++) {
@@ -16,25 +31,38 @@ for (let a = 2; a <= 10; a++) {
   }
 }
 
-const ALL = STATIC.concat(AUDIO);
+const ALL = STATIC.concat(CDN, AUDIO);
 
-// HTML-shell всегда грузим сначала из сети, чтобы пользователь моментально получал
-// последние правки кода. Кэшированный вариант — только для офлайна.
+// Живой трафик Firebase (Auth/Firestore API) кэшировать НЕЛЬЗЯ.
+// ВАЖНО: gstatic.com сюда не входит — оттуда грузится сам SDK, его как раз кэшируем.
+function isLiveApi(url) {
+  return url.indexOf('googleapis.com') !== -1 ||   // firestore, identitytoolkit, securetoken
+         url.indexOf('firebaseapp.com') !== -1 ||
+         url.indexOf('firebaseio.com') !== -1;
+}
+
+// HTML-shell всегда пробуем взять из сети, чтобы пользователь получал свежий код.
 function isHtmlShell(url) {
   return /\/(index\.html)?(\?.*)?$/.test(url) || url.indexOf('/index.html') !== -1;
 }
 
-// Установка — кэшировать всё
+// Установка — кэшировать всё, но УСТОЙЧИВО: каждый ресурс добавляется отдельно,
+// одна недоступная запись (например, битый mp3) не валит установку SW целиком.
+// Что не скачалось сейчас — докэшируется при первом онлайн-запросе (см. fetch ниже).
 self.addEventListener('install', function(e) {
   e.waitUntil(
     caches.open(CACHE).then(function(cache) {
-      return cache.addAll(ALL);
+      return Promise.all(ALL.map(function(url) {
+        return cache.add(url).catch(function(err) {
+          console.warn('[SW] не закэшировался:', url, err && err.message);
+        });
+      }));
     })
   );
   self.skipWaiting();
 });
 
-// Активация — удалить старые кэши
+// Активация — удалить старые версии кэша
 self.addEventListener('activate', function(e) {
   e.waitUntil(
     caches.keys().then(function(keys) {
@@ -47,35 +75,56 @@ self.addEventListener('activate', function(e) {
   self.clients.claim();
 });
 
-// Запросы — сначала кэш, потом сеть
+// Network-first с таймаутом для HTML-shell: если сеть не ответила за 3 секунды
+// (офлайн или lie-fi), отдаём кэш — приложение открывается быстро, а не висит.
+function networkFirstShell(request) {
+  function fromCache() {
+    return caches.match(request).then(function(cached) {
+      return cached || caches.match('./index.html');
+    });
+  }
+  return new Promise(function(resolve) {
+    var settled = false;
+    var timer = setTimeout(function() {
+      fromCache().then(function(cached) {
+        if (cached && !settled) { settled = true; resolve(cached); }
+        // если кэша нет — продолжаем ждать сеть, fetch ниже разрешит промис
+      });
+    }, 3000);
+    fetch(request).then(function(response) {
+      clearTimeout(timer);
+      if (response && response.status === 200) {
+        var clone = response.clone();
+        caches.open(CACHE).then(function(cache) { cache.put(request, clone); });
+      }
+      if (!settled) { settled = true; resolve(response); }
+    }).catch(function() {
+      clearTimeout(timer);
+      fromCache().then(function(cached) {
+        if (!settled) { settled = true; resolve(cached); }
+      });
+    });
+  });
+}
+
 self.addEventListener('fetch', function(e) {
-  // Firebase и внешние CDN — только сеть
-  if (e.request.url.indexOf('firebaseapp.com') !== -1 ||
-      e.request.url.indexOf('googleapis.com') !== -1 ||
-      e.request.url.indexOf('gstatic.com') !== -1 ||
-      e.request.url.indexOf('cdnjs.cloudflare.com') !== -1 ||
-      e.request.url.indexOf('firestore.googleapis.com') !== -1) {
+  var url = e.request.url;
+  // Не-GET (POST/PUT к Firestore и т.п.) и живой API — только сеть, мимо кэша.
+  if (e.request.method !== 'GET') return;
+  if (isLiveApi(url)) return;
+
+  // HTML-shell: network-first с таймаутом и фолбэком на кэш
+  if (e.request.mode === 'navigate' || isHtmlShell(url)) {
+    e.respondWith(networkFirstShell(e.request));
     return;
   }
-  // HTML-shell: network-first (свежая версия приходит каждый онлайн-визит, не залипает старый код)
-  if (e.request.mode === 'navigate' || isHtmlShell(e.request.url)) {
-    e.respondWith(
-      fetch(e.request).then(function(response) {
-        if (response && response.status === 200) {
-          var clone = response.clone();
-          caches.open(CACHE).then(function(cache) { cache.put(e.request, clone); });
-        }
-        return response;
-      }).catch(function() {
-        return caches.match(e.request);
-      })
-    );
-    return;
-  }
+
+  // Всё остальное — локальная статика, аудио, CDN-скрипты (React/Babel/Firebase SDK):
+  // cache-first с сетевым фолбэком и дозаписью в кэш.
   e.respondWith(
     caches.match(e.request).then(function(cached) {
-      return cached || fetch(e.request).then(function(response) {
-        // Кэшировать новые ресурсы
+      if (cached) return cached;
+      return fetch(e.request).then(function(response) {
         if (response && response.status === 200) {
           var clone = response.clone();
           caches.open(CACHE).then(function(cache) {
