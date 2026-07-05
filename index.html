@@ -3025,33 +3025,38 @@ function AdminApp({ user, profile, onLogout }) {
   useEffect(() => {
     (async () => {
       setLoading(true);
+      try {
       const snap = await db.collection("users").get();
       // Данные по каждому игроку берём ПАРАЛЛЕЛЬНО (Promise.all) — админка на 25 игроках
       // открывается кратно быстрее последовательного `for await`.
-      // Точное число сессий — через агрегационный запрос .count().get() (Firestore v10 compat).
-      // Раньше стоял .limit(30) на выборку самих сессий и sessionsCount = length — счётчик
-      // не мог превысить 30 у активных игроков. Плюс он же занижал общие «Сессий/Вопросов/
-      // Точность» и мог обрезать пики графика активности у самых активных.
+      // Раньше стоял .limit(30) и sessionsCount = length — счётчик не мог превысить 30
+      // у активных игроков. Плюс он же занижал «Сессий/Вопросов/Точность» и мог обрезать
+      // пики 14-дневного графика активности. .count() в compat SDK 10.7.1 не реализован
+      // (AggregateQuery только в модульном v9+), поэтому идём проще: один get() без лимита
+      // даёт и точный snap.size, и отсортированные docs — из которых извлекаем lastActive
+      // и 30-дневный срез для агрегатов уже в памяти.
       const cutoff30d = Date.now() - 30 * 86400000;
       const perUser = await Promise.all(snap.docs.map(async d => {
         const data = d.data();
         const userRef = db.collection("users").doc(d.id);
         // Ошибку по каждому подзапросу гасим — один сбой не валит всю админку.
         const safe = p => p.catch(() => null);
-        const [countSnap, lastSnap, recentSnap, factsSnap] = await Promise.all([
-          safe(userRef.collection("sessions").count().get()),
-          safe(userRef.collection("sessions").orderBy("date", "desc").limit(1).get()),
-          safe(userRef.collection("sessions").where("date", ">=", cutoff30d).get()),
+        const [sessSnap, factsSnap] = await Promise.all([
+          safe(userRef.collection("sessions").orderBy("date", "desc").get()),
           safe(userRef.collection("facts").get()),
         ]);
-        const sessionsCount = countSnap ? (countSnap.data().count || 0) : 0;
-        const lastDate = (lastSnap && !lastSnap.empty)
-          ? (lastSnap.docs[0].data().date || data.createdAt || 0)
-          : (data.createdAt || 0);
+        const sessionsCount = sessSnap ? sessSnap.size : 0;
+        let lastDate = data.createdAt || 0;
         const recent = [];
-        if (recentSnap) recentSnap.forEach(s => {
-          recent.push({ ...s.data(), _uid: d.id, _name: data.name });
-        });
+        if (sessSnap && !sessSnap.empty) {
+          lastDate = sessSnap.docs[0].data().date || lastDate;
+          sessSnap.forEach(s => {
+            const sd = s.data();
+            if ((sd.date || 0) >= cutoff30d) {
+              recent.push({ ...sd, _uid: d.id, _name: data.name });
+            }
+          });
+        }
         const factsList = [];
         if (factsSnap) factsSnap.forEach(f => factsList.push({ id: f.id, data: f.data() }));
         return {
@@ -3072,7 +3077,13 @@ function AdminApp({ user, profile, onLogout }) {
       setUsers(list);
       setAllSessions(sessAll);
       setAllFacts(factsAggr);
-      setLoading(false);
+      } catch (e) {
+        console.error("AdminApp load failed:", e);
+      } finally {
+        // ГАРАНТИЯ снятия «Загрузки…» даже при неожиданной ошибке —
+        // страховка от бесконечного белого экрана.
+        setLoading(false);
+      }
     })();
   }, []);
 
