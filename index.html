@@ -185,13 +185,16 @@ document.addEventListener('touchmove', function(e) {
   <div>Переверни телефон вертикально</div>
 </div>
 <div id="root"></div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<!-- Библиотеки хостятся у нас (vendor/) — офлайн и РФ-сети не зависят от CDN Google/Cloudflare.
+     Версии зафиксированы: react 18.2.0, babel-standalone 7.23.2, firebase 10.7.1.
+     Обновление — вручную, см. DEVLOG. -->
+<script src="./vendor/react.production.min.js"></script>
+<script src="./vendor/react-dom.production.min.js"></script>
+<script src="./vendor/babel.min.js"></script>
 
-<script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+<script src="./vendor/firebase-app-compat.js"></script>
+<script src="./vendor/firebase-auth-compat.js"></script>
+<script src="./vendor/firebase-firestore-compat.js"></script>
 
 <script>
 // ─── FIREBASE INIT ────────────────────────────────────────
@@ -1583,6 +1586,8 @@ function AuthScreen() {
         style={{...W, height:56, borderRadius:16, background: busy ? "#9CA3AF" : PU, color:"#fff", fontSize:18, fontWeight:700, border:"none", cursor: busy ? "default" : "pointer"}}>
         {busy ? "..." : (tab === "login" ? "Войти" : "Создать аккаунт")}
       </button>
+
+      <OfflineBadge />
     </div>
   );
 }
@@ -1606,6 +1611,46 @@ function Header({ name, badge, onLogout, onSettings }) {
       </div>
     </div>
   );
+}
+
+// ─── OFFLINE BADGE ───────────────────────────────────────
+// Готовность офлайн-режима: проверяем ФАКТИЧЕСКОЕ содержимое кэшей (критический shell
+// и счётчик озвучки), а не факт установки SW. Пока кэш греется — поллим раз в 3с.
+function OfflineBadge() {
+  const [st, setSt] = useState(null); // { shell: bool, audio: number }
+  useEffect(() => {
+    if (!("caches" in window)) return;
+    let alive = true, timer = null;
+    const SHELL_KEYS = [
+      "index.html", "manifest.json",
+      "vendor/react.production.min.js", "vendor/react-dom.production.min.js", "vendor/babel.min.js",
+      "vendor/firebase-app-compat.js", "vendor/firebase-auth-compat.js", "vendor/firebase-firestore-compat.js"
+    ];
+    const check = async () => {
+      try {
+        const res = await Promise.all(SHELL_KEYS.map(u => caches.match(u)));
+        const shell = res.every(Boolean);
+        let audio = 0;
+        for (const n of await caches.keys()) {
+          if (n.indexOf("audio") === -1) continue;
+          audio = (await (await caches.open(n)).keys()).length;
+        }
+        if (alive) setSt({ shell, audio });
+        return shell && audio >= 90;
+      } catch (e) { return true; } // проверить не смогли — бейдж просто не показываем
+    };
+    check().then(done => {
+      if (done || !alive) return;
+      timer = setInterval(() => check().then(d => { if (d && timer) { clearInterval(timer); timer = null; } }), 3000);
+    });
+    return () => { alive = false; if (timer) clearInterval(timer); };
+  }, []);
+  if (!st) return null;
+  const full = st.shell && st.audio >= 90;
+  const text = !st.shell ? "⏳ Готовим офлайн-режим… не выключай интернет"
+    : full ? "✓ Офлайн-режим полностью готов"
+    : `✓ Офлайн готов · озвучка ${st.audio}/90`;
+  return <div style={{fontSize:11.5, color: st.shell ? "#16A34A" : "#92400E", textAlign:"center", marginTop:14}}>{text}</div>;
 }
 
 // ─── CHILD APP ───────────────────────────────────────────
@@ -2023,6 +2068,8 @@ function ChildApp({ user, profile, onLogout }) {
         style={{...W, height:50, borderRadius:14, background:"#fff", color:PU, fontSize:16, fontWeight:700, border:`2px solid ${PL}`, cursor:"pointer"}}>
         🏆 Мои достижения
       </button>
+
+      <OfflineBadge />
     </div>
    );
   }
@@ -3157,6 +3204,10 @@ if ('serviceWorker' in navigator) {
       .catch(function(e) {
         console.log('SW registration failed:', e);
       });
+    // На каждой загрузке просим SW докачать недостающую озвучку (инкрементально).
+    navigator.serviceWorker.ready.then(function(reg) {
+      if (reg.active) reg.active.postMessage('warm-audio');
+    }).catch(function() {});
   });
 }
 </script>

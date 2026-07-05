@@ -1,26 +1,27 @@
-// Версию кэша поднимаем при каждом изменении списка ресурсов или стратегии —
-// activate удалит старые кэши.
-const CACHE = 'multiply-v4';
+// Двухуровневый кэш:
+//  - SHELL (критический минимум для запуска) — атомарный install, секунды даже на медленной сети.
+//    Если хоть один файл не скачался, install падает и браузер повторит установку позже —
+//    активной остаётся предыдущая рабочая версия. Никаких "дырявых" критических кэшей.
+//  - AUDIO (озвучка, 90 mp3) — отдельный кэш, докачивается В ФОНЕ и не блокирует установку.
+//    Версию shell поднимаем при каждом изменении состава/стратегии; audio живёт своей жизнью.
+const SHELL_CACHE = 'multiply-shell-v5';
+const AUDIO_CACHE = 'multiply-audio-v1';
+const KEEP_CACHES = [SHELL_CACHE, AUDIO_CACHE];
 
-// Локальная статика (app shell). sw.js сам себя НЕ кэширует — браузер хранит
-// скрипт SW отдельно, запросы на его обновление идут мимо fetch-обработчика.
-const STATIC = [
+// Все ресурсы same-origin (библиотеки самохостятся в vendor/) — кэширование простое и проверяемое,
+// без CORS/opaque-нюансов. sw.js сам себя не кэширует (браузер хранит скрипт SW отдельно).
+const SHELL = [
   '.',
   './index.html',
   './manifest.json',
   './icons/icon-192.png',
-  './icons/icon-512.png'
-];
-
-// CDN-скрипты, без которых приложение не стартует. Список должен В ТОЧНОСТИ
-// совпадать с <script src> в index.html — автотест сверяет их автоматически.
-const CDN = [
-  'https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js',
-  'https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js',
-  'https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js',
-  'https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js',
-  'https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js',
-  'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js'
+  './icons/icon-512.png',
+  './vendor/react.production.min.js',
+  './vendor/react-dom.production.min.js',
+  './vendor/babel.min.js',
+  './vendor/firebase-app-compat.js',
+  './vendor/firebase-auth-compat.js',
+  './vendor/firebase-firestore-compat.js'
 ];
 
 // Все 90 аудиофайлов озвучки
@@ -31,10 +32,7 @@ for (let a = 2; a <= 10; a++) {
   }
 }
 
-const ALL = STATIC.concat(CDN, AUDIO);
-
-// Живой трафик Firebase (Auth/Firestore API) кэшировать НЕЛЬЗЯ.
-// ВАЖНО: gstatic.com сюда не входит — оттуда грузится сам SDK, его как раз кэшируем.
+// Живой трафик Firebase (Auth/Firestore API) кэшировать нельзя.
 function isLiveApi(url) {
   return url.indexOf('googleapis.com') !== -1 ||   // firestore, identitytoolkit, securetoken
          url.indexOf('firebaseapp.com') !== -1 ||
@@ -46,33 +44,52 @@ function isHtmlShell(url) {
   return /\/(index\.html)?(\?.*)?$/.test(url) || url.indexOf('/index.html') !== -1;
 }
 
-// Установка — кэшировать всё, но УСТОЙЧИВО: каждый ресурс добавляется отдельно,
-// одна недоступная запись (например, битый mp3) не валит установку SW целиком.
-// Что не скачалось сейчас — докэшируется при первом онлайн-запросе (см. fetch ниже).
+function isAudio(url) {
+  return url.indexOf('/audio/') !== -1;
+}
+
+// Фоновая догрузка озвучки: докачиваем только недостающее. Ошибки не критичны —
+// добьём при следующем онлайн-заходе (страница шлёт 'warm-audio' на каждой загрузке).
+function warmAudioCache() {
+  return caches.open(AUDIO_CACHE).then(function(cache) {
+    return Promise.all(AUDIO.map(function(url) {
+      return cache.match(url).then(function(hit) {
+        if (hit) return;
+        return cache.add(url).catch(function() {});
+      });
+    }));
+  }).catch(function() {});
+}
+
+// install: атомарно и БЫСТРО — только критический набор (11 файлов, без аудио).
 self.addEventListener('install', function(e) {
   e.waitUntil(
-    caches.open(CACHE).then(function(cache) {
-      return Promise.all(ALL.map(function(url) {
-        return cache.add(url).catch(function(err) {
-          console.warn('[SW] не закэшировался:', url, err && err.message);
-        });
-      }));
+    caches.open(SHELL_CACHE).then(function(cache) {
+      return cache.addAll(SHELL);
     })
   );
   self.skipWaiting();
 });
 
-// Активация — удалить старые версии кэша
+// activate: удалить кэши старых версий (audio-кэш сохраняется), забрать клиентов,
+// затем — фоновая догрузка аудио (не блокирует активацию).
 self.addEventListener('activate', function(e) {
   e.waitUntil(
     caches.keys().then(function(keys) {
       return Promise.all(
-        keys.filter(function(k) { return k !== CACHE; })
+        keys.filter(function(k) { return KEEP_CACHES.indexOf(k) === -1; })
             .map(function(k) { return caches.delete(k); })
       );
+    }).then(function() {
+      return self.clients.claim();
     })
   );
-  self.clients.claim();
+  warmAudioCache(); // сознательно не в waitUntil — активация не ждёт 90 файлов
+});
+
+// Страница на каждой загрузке просит докачать недостающую озвучку.
+self.addEventListener('message', function(e) {
+  if (e.data === 'warm-audio') warmAudioCache();
 });
 
 // Network-first с таймаутом для HTML-shell: если сеть не ответила за 3 секунды
@@ -95,7 +112,7 @@ function networkFirstShell(request) {
       clearTimeout(timer);
       if (response && response.status === 200) {
         var clone = response.clone();
-        caches.open(CACHE).then(function(cache) { cache.put(request, clone); });
+        caches.open(SHELL_CACHE).then(function(cache) { cache.put(request, clone); });
       }
       if (!settled) { settled = true; resolve(response); }
     }).catch(function() {
@@ -107,32 +124,33 @@ function networkFirstShell(request) {
   });
 }
 
+// cache-first с сетевым фолбэком и дозаписью в указанный кэш.
+function cacheFirst(request, cacheName) {
+  return caches.match(request).then(function(cached) {
+    if (cached) return cached;
+    return fetch(request).then(function(response) {
+      if (response && response.status === 200) {
+        var clone = response.clone();
+        caches.open(cacheName).then(function(cache) { cache.put(request, clone); });
+      }
+      return response;
+    });
+  });
+}
+
 self.addEventListener('fetch', function(e) {
   var url = e.request.url;
   // Не-GET (POST/PUT к Firestore и т.п.) и живой API — только сеть, мимо кэша.
   if (e.request.method !== 'GET') return;
   if (isLiveApi(url)) return;
 
-  // HTML-shell: network-first с таймаутом и фолбэком на кэш
   if (e.request.mode === 'navigate' || isHtmlShell(url)) {
     e.respondWith(networkFirstShell(e.request));
     return;
   }
-
-  // Всё остальное — локальная статика, аудио, CDN-скрипты (React/Babel/Firebase SDK):
-  // cache-first с сетевым фолбэком и дозаписью в кэш.
-  e.respondWith(
-    caches.match(e.request).then(function(cached) {
-      if (cached) return cached;
-      return fetch(e.request).then(function(response) {
-        if (response && response.status === 200) {
-          var clone = response.clone();
-          caches.open(CACHE).then(function(cache) {
-            cache.put(e.request, clone);
-          });
-        }
-        return response;
-      });
-    })
-  );
+  if (isAudio(url)) {
+    e.respondWith(cacheFirst(e.request, AUDIO_CACHE));
+    return;
+  }
+  e.respondWith(cacheFirst(e.request, SHELL_CACHE));
 });
