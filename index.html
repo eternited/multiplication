@@ -1675,6 +1675,7 @@ function ChildApp({ user, profile, onLogout }) {
   const [showLevelUp, setShowLevelUp] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [online, setOnline] = useState(typeof navigator === "undefined" ? true : navigator.onLine);
   const t0 = useRef(null);
   const qTime = useRef(null);
   const sTimes = useRef([]);
@@ -1683,6 +1684,14 @@ function ChildApp({ user, profile, onLogout }) {
   const saveGateRef = useRef(null);
   const startDateRef = useRef(null);
   const commitSessionRef = useRef(null);
+
+  // Живой статус сети — для пометки «сохранено на устройстве» на экране результатов.
+  useEffect(() => {
+    const on = () => setOnline(true), off = () => setOnline(false);
+    window.addEventListener("online", on);
+    window.addEventListener("offline", off);
+    return () => { window.removeEventListener("online", on); window.removeEventListener("offline", off); };
+  }, []);
 
   // ── Режим изучения таблиц + воспроизведение MP3 ──
   const [studyTable, setStudyTable] = useState(2);
@@ -1875,7 +1884,11 @@ function ChildApp({ user, profile, onLogout }) {
     setShowLevelUp(result.leveledUp);
     setSc("results");
 
-    // Фоновая запись одним батчем
+    // Фоновая запись одним батчем. НЕ ждём (await) завершения: офлайн Firestore
+    // применяет запись в локальный кэш IndexedDB мгновенно, но промис не резолвит
+    // до восстановления сети. Если бы мы ждали — офлайн навсегда залипали бы в
+    // «Сохранение…» и нельзя было начать вторую тренировку. Данные не теряются:
+    // очередь записи переживает перезапуск и синхронизируется при появлении сети.
     try {
       const userRef = db.collection("users").doc(user.uid);
       const batch = db.batch();
@@ -1884,12 +1897,11 @@ function ChildApp({ user, profile, onLogout }) {
       }
       batch.set(userRef.collection("sessions").doc(), result.session);
       batch.update(userRef, result.profileUpdates);
-      await batch.commit();
+      batch.commit().catch(e => console.error("Не удалось синхронизировать сессию:", e));
     } catch (e) {
-      console.error("Не удалось сохранить сессию:", e);
-    } finally {
-      setSaving(false);
+      console.error("Ошибка формирования батча сессии:", e);
     }
+    setSaving(false);
   };
 
   // Сейф-нет: сохранение при сворачивании вкладки / закрытии страницы.
@@ -2390,6 +2402,12 @@ function ChildApp({ user, profile, onLogout }) {
             <div style={{display:"flex", flexWrap:"wrap", gap:7}}>
               {weak.map(([k]) => { const [a,b] = k.split("x"); return <span key={k} style={{padding:"6px 13px", background:"#FEF2F2", color:"#991B1B", borderRadius:9, fontSize:15, fontWeight:600}}>{a}×{b}={Number(a)*Number(b)}</span>; })}
             </div>
+          </div>
+        )}
+
+        {!online && (
+          <div style={{...W, fontSize:12, color:"#92400E", textAlign:"center", marginBottom:12, lineHeight:1.4}}>
+            📴 Результат сохранён на устройстве — отправится в облако, когда появится интернет
           </div>
         )}
 
