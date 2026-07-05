@@ -24,6 +24,35 @@
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   }
   #root { height: 100%; overflow-y: auto; overscroll-behavior-y: contain; touch-action: pan-y; -webkit-overflow-scrolling: touch; background: #F5F3FF; }
+  /* Сплэш-экран: виден с ПЕРВОГО кадра, пока грузятся vendor-скрипты и Babel компилирует JSX
+     (это самый долгий интервал на медленном интерфейсе). Убирается автоматически, как только
+     React рендерит первого потомка в #root, либо принудительно по таймауту 3с как страховка. */
+  #splash {
+    position: fixed; inset: 0; z-index: 9998;
+    background: linear-gradient(160deg, #F5F3FF 0%, #E9E5FE 100%);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 24px; text-align: center;
+    transition: opacity 0.35s ease-out;
+  }
+  #splash.splash-hidden { opacity: 0; pointer-events: none; }
+  #splash .splash-emoji { font-size: 68px; margin-bottom: 12px; animation: splashPulse 1.6s ease-in-out infinite; }
+  #splash .splash-title { font-size: 26px; font-weight: 700; color: #534AB7; margin-bottom: 4px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+  #splash .splash-sub   { font-size: 14px; color: #6B7280; margin-bottom: 28px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+  #splash .splash-spinner {
+    width: 40px; height: 40px; border-radius: 50%;
+    border: 3px solid rgba(83, 74, 183, 0.18);
+    border-top-color: #534AB7;
+    animation: splashSpin 0.9s linear infinite;
+  }
+  #splash .splash-hint { margin-top: 20px; font-size: 12px; color: #9CA3AF;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+  @keyframes splashSpin { to { transform: rotate(360deg); } }
+  @keyframes splashPulse {
+    0%, 100% { transform: scale(1); }
+    50%      { transform: scale(1.08); }
+  }
   button:active { opacity: 0.75; transform: scale(0.97); }
   input { -webkit-appearance: none; appearance: none; }
   /* Поля ввода — выделение и редактирование работают как обычно */
@@ -184,7 +213,39 @@ document.addEventListener('touchmove', function(e) {
   <div style="font-size:48px;margin-bottom:16px">↩️</div>
   <div>Переверни телефон вертикально</div>
 </div>
+<div id="splash" role="status" aria-label="Загрузка приложения">
+  <div class="splash-emoji">✖️</div>
+  <div class="splash-title">Таблица умножения</div>
+  <div class="splash-sub">Умная тренировка</div>
+  <div class="splash-spinner"></div>
+  <div class="splash-hint">Загружаем…</div>
+</div>
 <div id="root"></div>
+<script>
+// Снимаем сплэш, как только React вставил первого потомка в #root. Плюс страховка
+// по таймауту 3с — если React по любой причине не поднялся, пользователь не залипнет
+// на сплэше навсегда (увидит пустой экран/системную ошибку и сможет перезагрузить).
+(function () {
+  var splash = document.getElementById('splash');
+  var root = document.getElementById('root');
+  if (!splash || !root) return;
+  var removed = false;
+  function hide() {
+    if (removed) return;
+    removed = true;
+    splash.classList.add('splash-hidden');
+    setTimeout(function () { if (splash && splash.parentNode) splash.parentNode.removeChild(splash); }, 400);
+  }
+  if (root.children.length > 0) { hide(); return; }
+  if ('MutationObserver' in window) {
+    var mo = new MutationObserver(function () {
+      if (root.children.length > 0) { mo.disconnect(); hide(); }
+    });
+    mo.observe(root, { childList: true });
+  }
+  setTimeout(hide, 3000);
+})();
+</script>
 <!-- Библиотеки хостятся у нас (vendor/) — офлайн и РФ-сети не зависят от CDN Google/Cloudflare.
      Версии зафиксированы: react 18.2.0, babel-standalone 7.23.2, firebase 10.7.1.
      Обновление — вручную, см. DEVLOG. -->
