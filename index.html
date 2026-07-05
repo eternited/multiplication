@@ -3026,26 +3026,48 @@ function AdminApp({ user, profile, onLogout }) {
     (async () => {
       setLoading(true);
       const snap = await db.collection("users").get();
-      const list = [];
-      const sessAll = [];
-      const factsAggr = {};
-      for (const d of snap.docs) {
+      // Данные по каждому игроку берём ПАРАЛЛЕЛЬНО (Promise.all) — админка на 25 игроках
+      // открывается кратно быстрее последовательного `for await`.
+      // Точное число сессий — через агрегационный запрос .count().get() (Firestore v10 compat).
+      // Раньше стоял .limit(30) на выборку самих сессий и sessionsCount = length — счётчик
+      // не мог превысить 30 у активных игроков. Плюс он же занижал общие «Сессий/Вопросов/
+      // Точность» и мог обрезать пики графика активности у самых активных.
+      const cutoff30d = Date.now() - 30 * 86400000;
+      const perUser = await Promise.all(snap.docs.map(async d => {
         const data = d.data();
-        list.push({ uid: d.id, ...data });
-        try {
-          const sSnap = await db.collection("users").doc(d.id).collection("sessions").orderBy("date", "desc").limit(30).get();
-          const userSessions = [];
-          sSnap.forEach(s => { const sd = s.data(); userSessions.push(sd); sessAll.push({...sd, _uid: d.id, _name: data.name}); });
-          const lastDate = userSessions[0]?.date || data.createdAt || 0;
-          list[list.length-1].lastActive = lastDate;
-          list[list.length-1].sessionsCount = userSessions.length;
-          const fSnap = await db.collection("users").doc(d.id).collection("facts").get();
-          fSnap.forEach(f => {
-            const fd = f.data();
-            const cur = factsAggr[f.id] || {c:0, w:0};
-            factsAggr[f.id] = { c: cur.c + (fd.c||0), w: cur.w + (fd.w||0) };
-          });
-        } catch(e) {}
+        const userRef = db.collection("users").doc(d.id);
+        // Ошибку по каждому подзапросу гасим — один сбой не валит всю админку.
+        const safe = p => p.catch(() => null);
+        const [countSnap, lastSnap, recentSnap, factsSnap] = await Promise.all([
+          safe(userRef.collection("sessions").count().get()),
+          safe(userRef.collection("sessions").orderBy("date", "desc").limit(1).get()),
+          safe(userRef.collection("sessions").where("date", ">=", cutoff30d).get()),
+          safe(userRef.collection("facts").get()),
+        ]);
+        const sessionsCount = countSnap ? (countSnap.data().count || 0) : 0;
+        const lastDate = (lastSnap && !lastSnap.empty)
+          ? (lastSnap.docs[0].data().date || data.createdAt || 0)
+          : (data.createdAt || 0);
+        const recent = [];
+        if (recentSnap) recentSnap.forEach(s => {
+          recent.push({ ...s.data(), _uid: d.id, _name: data.name });
+        });
+        const factsList = [];
+        if (factsSnap) factsSnap.forEach(f => factsList.push({ id: f.id, data: f.data() }));
+        return {
+          user: { uid: d.id, ...data, lastActive: lastDate, sessionsCount },
+          recent, factsList,
+        };
+      }));
+
+      const list = perUser.map(x => x.user);
+      const sessAll = perUser.flatMap(x => x.recent);
+      const factsAggr = {};
+      for (const x of perUser) {
+        for (const { id, data: fd } of x.factsList) {
+          const cur = factsAggr[id] || { c: 0, w: 0 };
+          factsAggr[id] = { c: cur.c + (fd.c || 0), w: cur.w + (fd.w || 0) };
+        }
       }
       setUsers(list);
       setAllSessions(sessAll);
@@ -3071,7 +3093,10 @@ function AdminApp({ user, profile, onLogout }) {
     return <div style={{...base, justifyContent:"center"}}><div style={{fontSize:16, color:"#6B7280"}}>Загрузка…</div></div>;
   }
 
-  const totalSessions = allSessions.length;
+  // Точное «всего сессий» — сумма sessionsCount по всем игрокам (не length allSessions:
+  // allSessions теперь содержит ТОЛЬКО последние 30 дней, для агрегатов активности).
+  const totalSessions = users.reduce((s, u) => s + (u.sessionsCount || 0), 0);
+  // «Вопросов» и «Точность» — за последние 30 дней (подписано отдельно на карточках).
   const totalQ = allSessions.reduce((s,x) => s+(x.total||0), 0);
   const totalC = allSessions.reduce((s,x) => s+(x.correct||0), 0);
   const acc = totalQ ? Math.round(totalC/totalQ*100) : 0;
@@ -3165,12 +3190,14 @@ function AdminApp({ user, profile, onLogout }) {
             {card("Активны 30д", active30d)}
           </div>
 
-          {/* Общая активность */}
+          {/* Общая активность. Сессий — за всё время (точный count).
+              Вопросов/Точность — за 30 дней (подписано на карточках), чтобы не таскать
+              полную историю каждого игрока при открытии админки. */}
           <div style={{...W, display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr", gap:7, marginBottom:18}}>
             {card("Всего", users.length)}
             {card("Сессий", totalSessions)}
-            {card("Вопросов", totalQ)}
-            {card("Точность", `${acc}%`)}
+            {card("Вопросов 30д", totalQ)}
+            {card("Точность 30д", `${acc}%`)}
           </div>
 
           {/* Блок Новые регистрации */}
