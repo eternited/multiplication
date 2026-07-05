@@ -543,12 +543,14 @@ const playSound = (type) => {
       const pattern = type === "wrong"   ? [30, 50, 30]
                     : type === "eq"      ? 25
                     : type === "levelup" ? [40, 80, 40]
+                    : type === "fanfare" ? [50, 60, 50, 60, 90] // ритм под «Ta-da-DA»
                     : 12; // num, del — короткий тап по клавише
       navigator.vibrate(pattern);
     }
     const hapticDur = type === "wrong"   ? 0.04
                     : type === "eq"      ? 0.025
                     : type === "levelup" ? 0.05
+                    : type === "fanfare" ? 0.06
                     : 0.012; // num, del
     hapticPulse(hapticDur);
     const ctx = ensureCtx();
@@ -611,6 +613,60 @@ const playSound = (type) => {
         g2.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
         o2.start(t);
         o2.stop(t + 0.35);
+      });
+      return;
+    } else if (type === "fanfare") {
+      // Торжественные фанфары для повышения звания: два восходящих призыва
+      // трубного тембра (square с чуть детюненной parallel-нотой) + финальный
+      // мажорный аккорд C-E-G-C с длинным хвостом. Играется автоматически при
+      // появлении экрана результатов, если ребёнок повысил звание.
+      const t0 = ctx.currentTime;
+      const callNotes = [
+        // «Ta-da-DA» дважды, вверх
+        [523.25, t0 + 0.00, 0.13, 0.20],   // C5
+        [659.25, t0 + 0.13, 0.13, 0.22],   // E5
+        [783.99, t0 + 0.26, 0.20, 0.26],   // G5 — долгая
+        [659.25, t0 + 0.55, 0.11, 0.20],   // E5
+        [783.99, t0 + 0.66, 0.11, 0.22],   // G5
+        [1046.5, t0 + 0.77, 0.30, 0.30],   // C6 — кульминация
+      ];
+      callNotes.forEach(([freq, at, dur, peak]) => {
+        // основной трубный тон
+        const oM = ctx.createOscillator();
+        const gM = ctx.createGain();
+        oM.connect(gM); gM.connect(ctx.destination);
+        oM.type = "square";
+        oM.frequency.setValueAtTime(freq, at);
+        gM.gain.setValueAtTime(0.001, at);
+        gM.gain.exponentialRampToValueAtTime(peak, at + 0.02);
+        gM.gain.exponentialRampToValueAtTime(0.001, at + dur);
+        oM.start(at);
+        oM.stop(at + dur + 0.02);
+        // октавой ниже (triangle) — придаёт «духовому» тембру плотность
+        const oD = ctx.createOscillator();
+        const gD = ctx.createGain();
+        oD.connect(gD); gD.connect(ctx.destination);
+        oD.type = "triangle";
+        oD.frequency.setValueAtTime(freq / 2, at);
+        gD.gain.setValueAtTime(0.001, at);
+        gD.gain.exponentialRampToValueAtTime(peak * 0.55, at + 0.02);
+        gD.gain.exponentialRampToValueAtTime(0.001, at + dur);
+        oD.start(at);
+        oD.stop(at + dur + 0.02);
+      });
+      // Финальный мажорный аккорд с медленным затуханием (после кульминации)
+      const chordAt = t0 + 1.10;
+      [261.63, 329.63, 392.00, 523.25].forEach(freq => {
+        const oC = ctx.createOscillator();
+        const gC = ctx.createGain();
+        oC.connect(gC); gC.connect(ctx.destination);
+        oC.type = "triangle";
+        oC.frequency.setValueAtTime(freq, chordAt);
+        gC.gain.setValueAtTime(0.001, chordAt);
+        gC.gain.exponentialRampToValueAtTime(0.16, chordAt + 0.04);
+        gC.gain.exponentialRampToValueAtTime(0.001, chordAt + 0.90);
+        oC.start(chordAt);
+        oC.stop(chordAt + 0.92);
       });
       return;
     }
@@ -821,6 +877,26 @@ window.playSound = playSound;
     const yesterday = `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,"0")}-${String(t.getDate()).padStart(2,"0")}`;
     if (lastActiveDate === yesterday) return (prevStreak || 0) + 1;
     return 1;
+  }
+
+  // Что реально показывать в UI: streakDays из профиля обновляется только по факту
+  // завершения новой сессии. Между сессиями значение может «висеть» устаревшим.
+  //  - lastActiveDate == сегодня → серия живая, показываем streakDays
+  //  - lastActiveDate == вчера   → серия ещё жива (ожидает продления сегодня), показываем streakDays
+  //  - иначе                     → серия уже оборвана (пропущено ≥ 2 суток) → 0
+  // Функция чистая — не мутирует БД. Данные в базе исправятся автоматически
+  // при следующей сессии; для отображения нужна честная картинка немедленно.
+  function effectiveStreak(streakDays, lastActiveDate, today){
+    const s = streakDays || 0;
+    if (!s || !lastActiveDate) return 0;
+    today = today || todayStr();
+    if (lastActiveDate === today) return s;
+    const [y, m, d] = today.split("-").map(Number);
+    const t = new Date(y, m - 1, d);
+    t.setDate(t.getDate() - 1);
+    const yesterday = `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,"0")}-${String(t.getDate()).padStart(2,"0")}`;
+    if (lastActiveDate === yesterday) return s;
+    return 0;
   }
 
   // ── Верных за календарный день (сброс при новом дне) ──
@@ -1182,7 +1258,7 @@ window.playSound = playSound;
     comboMultiplier, nextCombo, computeAnswerXP, sessionBonus,
     CHAINS, CHAIN_ORDER, CHAIN_TITLES, BADGES, BADGE_BY_ID,
     computeUnlockedBadges, migrateLegacy, mergeOwned, visibleChainBadges, ownedBadgesByChain,
-    todayStr, computeStreak, updateDailyCorrect, countTablesMastered,
+    todayStr, computeStreak, effectiveStreak, updateDailyCorrect, countTablesMastered,
     wt, pick, unlinkChild,
     computeSessionCommit, makeSaveGate, pickInitialSettings,
     filterSessionsByPeriod, aggregateSessions, PERIOD_MS,
@@ -1217,7 +1293,7 @@ const gen6 = () => String(Math.floor(100000 + Math.random() * 900000));
 const G = window.GAME;
 const { getRank, isLevelUp, computeAnswerXP, comboMultiplier, nextCombo, sessionBonus,
         CHAIN_ORDER, CHAIN_TITLES, BADGE_BY_ID, computeUnlockedBadges, migrateLegacy,
-        mergeOwned, visibleChainBadges, ownedBadgesByChain, todayStr, computeStreak, updateDailyCorrect,
+        mergeOwned, visibleChainBadges, ownedBadgesByChain, todayStr, computeStreak, effectiveStreak, updateDailyCorrect,
         countTablesMastered, pick, computeSessionCommit, makeSaveGate,
         pickInitialSettings, unlinkChild, tableRows,
         filterSessionsByPeriod, aggregateSessions,
@@ -1754,6 +1830,13 @@ function ChildApp({ user, profile, onLogout }) {
     return () => { window.removeEventListener("online", on); window.removeEventListener("offline", off); };
   }, []);
 
+  // Фанфары при повышении звания — играются автоматически один раз, как только
+  // открывается экран результатов с активным showLevelUp. Дальше по кнопке «Класс!»
+  // отдельно звучит короткий levelup-акцент (там же снимаем showLevelUp).
+  useEffect(() => {
+    if (showLevelUp) window.playSound("fanfare");
+  }, [showLevelUp]);
+
   // ── Режим изучения таблиц + воспроизведение MP3 ──
   const [studyTable, setStudyTable] = useState(2);
   const [studyActiveRow, setStudyActiveRow] = useState(-1);
@@ -2174,7 +2257,7 @@ function ChildApp({ user, profile, onLogout }) {
           {[
             ["Всего очков", `⭐ ${prof.totalXP || 0}`],
             ["Рекорд за игру", `🚀 ${prof.bestSessionXP || 0}`],
-            ["Серия дней", `🔥 ${prof.streakDays || 0}`]
+            ["Серия дней", `🔥 ${effectiveStreak(prof.streakDays, prof.lastActiveDate)}`]
           ].map(([l,v]) => (
             <div key={l} style={{background:"#fff", borderRadius:14, padding:"14px 6px", textAlign:"center", border:"1.5px solid #E5E7EB"}}>
               <div style={{fontSize:18, fontWeight:800, color:"#1F2937", marginBottom:4}}>{v}</div>
@@ -2540,7 +2623,7 @@ function StatsView({ facts, sessions, name, onBack, profile }) {
             {[
               ["Очков всего", `⭐ ${profile.totalXP || 0}`],
               ["Рекорд за игру", `🚀 ${profile.bestSessionXP || 0}`],
-              ["Серия дней", `🔥 ${profile.streakDays || 0}`]
+              ["Серия дней", `🔥 ${effectiveStreak(profile.streakDays, profile.lastActiveDate)}`]
             ].map(([l,v]) => (
               <div key={l} style={{background:"#fff", borderRadius:12, padding:"12px 6px", textAlign:"center", border:"1.5px solid #E5E7EB"}}>
                 <div style={{fontSize:16, fontWeight:800, color:"#1F2937", marginBottom:3}}>{v}</div>
