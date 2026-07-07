@@ -2048,23 +2048,34 @@ function ChildApp({ user, profile, onLogout }) {
     setSaving(false);
   };
 
-  // Сейф-нет: сохранение при сворачивании вкладки / закрытии страницы.
-  // Сохраняем только если сессия идёт, есть >0 ответов и ещё не сохраняли.
+  // Раньше здесь стоял «сейф-нет» на visibilitychange/pagehide/beforeunload —
+  // при любом уходе вкладки в фон commitSession завершал сессию досрочно.
+  // На телефоне это стреляло при КАЖДОЙ блокировке экрана: ребёнок ответил на 5/20,
+  // экран погас — сессия сохранилась как «5 из 20, 25%», в результатах одна звезда.
+  // Оставляем только beforeunload (реальное закрытие вкладки на десктопе). Блокировка
+  // экрана и переход в другое приложение больше не завершают тренировку — при
+  // разблокировке ребёнок продолжит с текущего вопроса.
+  //
+  // + qTime.current сбрасывается при возврате в вкладку, если ребёнок в фазе «q»:
+  // время, проведённое с погашенным экраном, не должно добавляться к «сколько думал
+  // над вопросом». Иначе средний ответ = 3 минуты после первой же блокировки.
   useEffect(() => {
-    const flush = () => {
+    const flushOnUnload = () => {
       const r = R.current;
       if (r.sc === "train" && (r.sTot || 0) > 0 && saveGateRef.current && !saveGateRef.current.isSaved()) {
         commitSessionRef.current && commitSessionRef.current();
       }
     };
-    const onVis = () => { if (document.hidden) flush(); };
-    document.addEventListener("visibilitychange", onVis);
-    window.addEventListener("pagehide", flush);
-    window.addEventListener("beforeunload", flush);
+    const onVisibleAgain = () => {
+      if (document.hidden) return;
+      const r = R.current;
+      if (r.sc === "train" && r.ph === "q") qTime.current = Date.now();
+    };
+    document.addEventListener("visibilitychange", onVisibleAgain);
+    window.addEventListener("beforeunload", flushOnUnload);
     return () => {
-      document.removeEventListener("visibilitychange", onVis);
-      window.removeEventListener("pagehide", flush);
-      window.removeEventListener("beforeunload", flush);
+      document.removeEventListener("visibilitychange", onVisibleAgain);
+      window.removeEventListener("beforeunload", flushOnUnload);
     };
   }, []);
 
