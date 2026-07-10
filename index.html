@@ -1253,6 +1253,21 @@ window.playSound = playSound;
     return hex;
   }
 
+  // Плашка свежести данных на экране статистики ребёнка (родительский аккаунт).
+  // status: "fresh" — сервер только что подтвердил данные;
+  //         "updating" — показана локальная копия, запрос к серверу ещё идёт;
+  //         "offline" — сервер недоступен, осталась локальная копия.
+  // loadedAt — timestamp последней УСПЕШНОЙ загрузки с сервера (null, если неизвестен).
+  // fmt — инжектируемый форматтер даты (в тестах — заглушка).
+  function freshnessBanner(status, loadedAt, fmt){
+    const when = loadedAt ? (fmt ? fmt(loadedAt) : String(loadedAt)) : null;
+    if (status === "fresh")
+      return { tone: "ok", text: "✓ Данные актуальны — загружены " + (when || "только что") };
+    if (status === "offline")
+      return { tone: "warn", text: "📡 Нет связи — показаны сохранённые данные" + (when ? " от " + when : "") };
+    return { tone: "wait", text: "⏳ Показаны сохранённые данные" + (when ? " от " + when : "") + " — обновляю…" };
+  }
+
   const GAME = {
     NUMS, SES_OPTS, RANKS, rankIndex, getRank, isLevelUp,
     comboMultiplier, nextCombo, computeAnswerXP, sessionBonus,
@@ -1267,6 +1282,7 @@ window.playSound = playSound;
     groupRegistrationsByDay, filterUsers, sortUsers, paginate,
     validatePasswordChange, sha256Hex,
     isRecoveryFresh, decideRecoveryAction, orchestratePasswordChange,
+    freshnessBanner,
   };
   global.GAME = GAME;
   if (typeof module !== "undefined" && module.exports) module.exports = GAME;
@@ -1316,22 +1332,45 @@ const fmtDay = ts => new Date(ts).toLocaleDateString("ru-RU", {day:"numeric", mo
 const fmtS = s => s < 60 ? `${s}с` : `${Math.floor(s/60)}м ${s%60}с`;
 
 // ─── FIRESTORE I/O ───────────────────────────────────────
+// opts.source: "cache" — только локальный кэш Firestore (мгновенно; бросает ошибку,
+//              если профиля в кэше ещё нет — например, при первом просмотре);
+//              "server" — строго сервер (бросает ошибку офлайн; нужен там, где важно
+//              отличить свежие данные от кэша — обычный get() при плохой сети после
+//              долгой паузы МОЛЧА отдаёт кэш, и устаревшее неотличимо от актуального);
+//              не задан — стандартное поведение SDK (сервер с фолбэком на кэш).
+// Три запроса идут параллельно: последовательные await утраивали сетевую задержку.
 async function loadUserData(uid, opts) {
   const allSessions = !!(opts && opts.allSessions);
-  const userDoc = await db.collection("users").doc(uid).get();
-  if (!userDoc.exists) return null;
-  const profile = userDoc.data();
-  const factsSnap = await db.collection("users").doc(uid).collection("facts").get();
-  const facts = {};
-  factsSnap.forEach(d => facts[d.id] = d.data());
+  const source = opts && opts.source;
+  const g = ref => source ? ref.get({ source }) : ref.get();
+  const userRef = db.collection("users").doc(uid);
   // Для родителя/админа грузим ВСЕ сессии (фильтр по периоду — на клиенте).
   // Для ребёнка/прочих остаётся лимит 50, чтобы не тянуть всё ради собственных нужд.
-  let q = db.collection("users").doc(uid).collection("sessions").orderBy("date", "desc");
+  let q = userRef.collection("sessions").orderBy("date", "desc");
   if (!allSessions) q = q.limit(50);
-  const sessSnap = await q.get();
+  const [userDoc, factsSnap, sessSnap] = await Promise.all([
+    g(userRef),
+    g(userRef.collection("facts")),
+    g(q),
+  ]);
+  if (!userDoc.exists) return null;
+  const profile = userDoc.data();
+  const facts = {};
+  factsSnap.forEach(d => facts[d.id] = d.data());
   const sessions = [];
   sessSnap.forEach(d => sessions.push({id: d.id, ...d.data()}));
   return { uid, profile, facts, sessions };
+}
+
+// Когда данные пользователя в последний раз были УСПЕШНО получены с сервера —
+// для плашки свежести на экране статистики. localStorage переживает перезапуски PWA.
+const serverLoadedAtKey = uid => "xm_serverLoadedAt_" + uid;
+function getServerLoadedAt(uid) {
+  try { const v = localStorage.getItem(serverLoadedAtKey(uid)); return v ? Number(v) : null; }
+  catch(e) { return null; }
+}
+function setServerLoadedAt(uid, ts) {
+  try { localStorage.setItem(serverLoadedAtKey(uid), String(ts)); } catch(e) {}
 }
 
 // Идемпотентное создание кода привязки: резервирование кода и запись inviteCode в профиль
@@ -2582,7 +2621,7 @@ function ChildApp({ user, profile, onLogout }) {
 }
 
 // ─── STATS VIEW (used by parent & admin) ─────────────────
-function StatsView({ facts, sessions, name, onBack, profile }) {
+function StatsView({ facts, sessions, name, onBack, profile, freshness }) {
   const [period, setPeriod] = useState("week"); // day | week | month | all
   const filtered = useMemo(() => filterSessionsByPeriod(sessions || [], period), [sessions, period]);
   const aggr = useMemo(() => aggregateSessions(filtered), [filtered]);
@@ -2604,6 +2643,22 @@ function StatsView({ facts, sessions, name, onBack, profile }) {
         <h2 style={{fontSize:22, fontWeight:700, margin:0, color:PU}}>{name}</h2>
         <button onClick={onBack} style={{height:36, padding:"0 14px", borderRadius:9, background:"transparent", color:"#6B7280", fontSize:14, border:"1.5px solid #D1D5DB", cursor:"pointer"}}>Назад</button>
       </div>
+
+      {freshness && (() => {
+        const b = G.freshnessBanner(freshness.status, freshness.loadedAt, fmtD);
+        const tones = {
+          ok:   { bg:"#ECFDF5", tx:"#047857", bd:"#A7F3D0" },
+          wait: { bg:"#FFFBEB", tx:"#92400E", bd:"#FDE68A" },
+          warn: { bg:"#FEF2F2", tx:"#991B1B", bd:"#FECACA" },
+        };
+        const t = tones[b.tone] || tones.wait;
+        return (
+          <div style={{...W, marginBottom:12, padding:"7px 12px", borderRadius:10, fontSize:12, textAlign:"center",
+            background:t.bg, color:t.tx, border:`1.5px solid ${t.bd}`}}>
+            {b.text}
+          </div>
+        );
+      })()}
 
       {showGamify && (
         <>
@@ -2793,12 +2848,43 @@ function ParentApp({ user, profile, onLogout }) {
     }
   };
 
+  // Открытие статистики ребёнка: сразу показываем локальную копию (кэш Firestore),
+  // параллельно строго с сервера тянем свежие данные и по приходу обновляем экран.
+  // openUidRef защищает от гонки: ответ для уже закрытого/другого ребёнка игнорируется.
+  const openUidRef = useRef(null);
   const openChild = async (c) => {
+    openUidRef.current = c.uid;
     setSelected(c);
     setChildData(null);
-    const data = await loadUserData(c.uid, { allSessions: true });
-    setChildData(data);
+    let cacheShown = false;
+    try {
+      const cached = await loadUserData(c.uid, { allSessions: true, source: "cache" });
+      if (cached && openUidRef.current === c.uid) {
+        cacheShown = true;
+        setChildData({ ...cached, freshness: { status: "updating", loadedAt: getServerLoadedAt(c.uid) } });
+      }
+    } catch (e) {} // кэша ещё нет (первый просмотр этого ребёнка) — ждём сервер
+    try {
+      const fresh = await loadUserData(c.uid, { allSessions: true, source: "server" });
+      if (openUidRef.current !== c.uid) return;
+      if (fresh) {
+        const now = Date.now();
+        setServerLoadedAt(c.uid, now);
+        setChildData({ ...fresh, freshness: { status: "fresh", loadedAt: now } });
+      } else if (!cacheShown) {
+        setChildData({ unavailable: true });
+      }
+    } catch (e) {
+      if (openUidRef.current !== c.uid) return;
+      if (cacheShown) {
+        setChildData(prev => prev && prev.freshness
+          ? { ...prev, freshness: { ...prev.freshness, status: "offline" } } : prev);
+      } else {
+        setChildData({ unavailable: true });
+      }
+    }
   };
+  const closeChild = () => { openUidRef.current = null; setSelected(null); setChildData(null); };
 
   const doUnlink = async () => {
     if (!unlinkTarget) return;
@@ -2814,9 +2900,28 @@ function ParentApp({ user, profile, onLogout }) {
     }
   };
 
+  if (selected && childData && childData.unavailable) {
+    return (
+      <div style={{...base, justifyContent:"center"}}>
+        <div style={{fontSize:15, color:"#6B7280", textAlign:"center", padding:"0 28px", lineHeight:1.5, marginBottom:18}}>
+          Не удалось загрузить данные: нет связи с сервером, а сохранённой копии на этом устройстве ещё нет.
+        </div>
+        <div style={{display:"flex", gap:10, justifyContent:"center"}}>
+          <button onClick={() => openChild(selected)}
+            style={{height:44, padding:"0 22px", borderRadius:12, background:PU, color:"#fff", border:"none", fontWeight:700, fontSize:15, cursor:"pointer"}}>
+            Повторить
+          </button>
+          <button onClick={closeChild}
+            style={{height:44, padding:"0 22px", borderRadius:12, background:"transparent", color:"#6B7280", border:"1.5px solid #D1D5DB", fontSize:15, cursor:"pointer"}}>
+            Назад
+          </button>
+        </div>
+      </div>
+    );
+  }
   if (selected && childData) {
     return <StatsView name={selected.name} facts={childData.facts} sessions={childData.sessions}
-      profile={childData.profile} onBack={() => { setSelected(null); setChildData(null); }} />;
+      profile={childData.profile} freshness={childData.freshness} onBack={closeChild} />;
   }
   if (selected && !childData) {
     return <div style={{...base, justifyContent:"center"}}><div style={{fontSize:16, color:"#6B7280"}}>Загрузка…</div></div>;
