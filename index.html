@@ -1253,6 +1253,62 @@ window.playSound = playSound;
     return hex;
   }
 
+  // Восстановление профиля при запуске для УЖЕ залогиненного пользователя.
+  // Железное правило: сетевые проблемы не должны выкидывать на форму входа.
+  // Чистая функция с инжектируемыми шагами (тестируется без Firebase):
+  //   getCache()    → профиль из локального кэша Firestore или null (может бросать);
+  //   getServer()   → Promise<профиль | null>; null = профиль удалён, throw = сеть;
+  //   getSnapshot() → запасная копия профиля из localStorage или null;
+  //   apply(p, src) → вход в приложение (src: "cache" | "server" | "snapshot");
+  //   onDeleted()   → профиль удалён на сервере (разлогин);
+  //   onNoProfile() → профиля нет нигде (экран «нет связи», НЕ форма входа);
+  //   timeoutMs     → сколько ждать сервер, когда показать больше нечего.
+  // Сервер применяется, КОГДА БЫ ни ответил: даже если уже вошли из кэша/снапшота,
+  // поздний ответ обновит данные (или разлогинит, если аккаунт удалён).
+  async function restoreProfileFlow(s) {
+    let entered = false;
+    try {
+      const cached = await s.getCache();
+      if (cached) { s.apply(cached, "cache"); entered = true; }
+    } catch (e) {} // кэша нет — не страшно
+    const serverP = (async () => {
+      const p = await s.getServer();
+      if (p === null) { s.onDeleted(); return null; }
+      s.apply(p, "server");
+      return p;
+    })();
+    serverP.catch(() => {}); // поздний сетевой отказ не должен стать unhandled rejection
+    if (entered) return "cache";
+    try {
+      await Promise.race([
+        serverP,
+        new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), s.timeoutMs || 8000)),
+      ]);
+      return "server";
+    } catch (e) {
+      const snap = s.getSnapshot ? s.getSnapshot() : null;
+      if (snap) { s.apply(snap, "snapshot"); return "snapshot"; }
+      s.onNoProfile();
+      return "none";
+    }
+  }
+
+  // Человеческие сообщения об ошибках входа/регистрации вместо английских из Firebase.
+  function authErrorMessage(code, fallback) {
+    const map = {
+      "auth/network-request-failed": "Нет соединения с сервером. Для входа и регистрации нужен интернет — офлайн работает только уже выполненный вход.",
+      "auth/too-many-requests": "Слишком много попыток. Подожди немного и попробуй снова.",
+      "auth/email-already-in-use": "Такое имя уже занято",
+      "auth/wrong-password": "Неверный пароль",
+      "auth/user-not-found": "Пользователь не найден",
+      "auth/invalid-credential": "Неверное имя или пароль",
+      "auth/invalid-login-credentials": "Неверное имя или пароль",
+      "auth/weak-password": "Слабый пароль",
+      "auth/invalid-email": "Недопустимое имя",
+    };
+    return map[code] || fallback || "Ошибка";
+  }
+
   // Плашка свежести данных на экране статистики ребёнка (родительский аккаунт).
   // status: "fresh" — сервер только что подтвердил данные;
   //         "updating" — показана локальная копия, запрос к серверу ещё идёт;
@@ -1282,7 +1338,7 @@ window.playSound = playSound;
     groupRegistrationsByDay, filterUsers, sortUsers, paginate,
     validatePasswordChange, sha256Hex,
     isRecoveryFresh, decideRecoveryAction, orchestratePasswordChange,
-    freshnessBanner,
+    freshnessBanner, restoreProfileFlow, authErrorMessage,
   };
   global.GAME = GAME;
   if (typeof module !== "undefined" && module.exports) module.exports = GAME;
@@ -1371,6 +1427,17 @@ function getServerLoadedAt(uid) {
 }
 function setServerLoadedAt(uid, ts) {
   try { localStorage.setItem(serverLoadedAtKey(uid), String(ts)); } catch(e) {}
+}
+
+// Запасная копия профиля для офлайн-входа: iOS может вычистить кэш Firestore (IndexedDB),
+// тогда залогиненный пользователь без сети остался бы без профиля. localStorage живучее.
+const profileSnapKey = uid => "xm_profile_" + uid;
+function getProfileSnapshot(uid) {
+  try { const v = localStorage.getItem(profileSnapKey(uid)); return v ? JSON.parse(v) : null; }
+  catch(e) { return null; }
+}
+function saveProfileSnapshot(uid, p) {
+  try { localStorage.setItem(profileSnapKey(uid), JSON.stringify(p)); } catch(e) {}
 }
 
 // Идемпотентное создание кода привязки: резервирование кода и запись inviteCode в профиль
@@ -1487,31 +1554,49 @@ function App() {
   const [user, setUser] = useState(null);
   const [profile, setProfile] = useState(null);
 
+  // true, когда Firebase подтвердил сохранённую сессию. Пока профиль едет по сети,
+  // страховка ниже НЕ имеет права показать форму входа — пользователь-то залогинен.
+  const authedRef = useRef(false);
+
   useEffect(() => {
     const unsub = auth.onAuthStateChanged(async u => {
-      if (!u) { setAuthState("guest"); setUser(null); setProfile(null); return; }
-      try {
-        const doc = await db.collection("users").doc(u.uid).get();
-        if (!doc.exists) { await auth.signOut(); setAuthState("guest"); return; }
-        const p = doc.data();
-        // Фиксируем факт входа (без блокировки UI). Старые профили без lastLogin это поле получат тут же.
-        const now = Date.now();
-        db.collection("users").doc(u.uid).update({ lastLogin: now }).catch(()=>{});
-        setUser(u); setProfile({ ...p, lastLogin: now });
+      if (!u) { authedRef.current = false; setAuthState("guest"); setUser(null); setProfile(null); return; }
+      authedRef.current = true;
+      const userRef = db.collection("users").doc(u.uid);
+      const apply = (p, src) => {
+        if (src === "server") saveProfileSnapshot(u.uid, p);
+        setUser(u); setProfile(p);
         setAuthState(p.role || "child");
-      } catch(e) {
-        console.error(e); setAuthState("guest");
-      }
+      };
+      // Кэш → мгновенный вход; сервер → свежий профиль (когда бы ни ответил);
+      // localStorage-снапшот → запасной вход; совсем ничего → экран «нет связи».
+      // Сетевые проблемы больше НИКОГДА не выкидывают залогиненного на форму входа.
+      await G.restoreProfileFlow({
+        getCache: () => userRef.get({ source: "cache" }).then(d => d.exists ? d.data() : null),
+        getServer: () => userRef.get({ source: "server" }).then(d => {
+          if (!d.exists) return null;
+          // Фиксируем факт входа (без блокировки UI). Старые профили без lastLogin получат поле тут же.
+          const now = Date.now();
+          userRef.update({ lastLogin: now }).catch(()=>{});
+          return { ...d.data(), lastLogin: now };
+        }),
+        getSnapshot: () => getProfileSnapshot(u.uid),
+        apply,
+        onDeleted: () => { auth.signOut(); }, // профиль удалён на сервере → честный разлогин
+        onNoProfile: () => setAuthState("noprofile"),
+        timeoutMs: 8000,
+      });
     });
     return () => unsub();
   }, []);
 
   // Страховка от вечной "Загрузки…": если Firebase за 3с не отдал auth-состояние
-  // (нет сети И нет локального токена) — показываем форму входа. Если колбэк
-  // onAuthStateChanged всё же придёт позже, он перезапишет состояние корректным.
+  // (нет сети И нет локального токена) — показываем форму входа. Но только если
+  // сохранённой сессии действительно нет: залогиненному форму входа не показываем,
+  // даже когда профиль ещё едет по плохой сети (authedRef).
   useEffect(() => {
     const t = setTimeout(() => {
-      setAuthState(s => (s === "loading" ? "guest" : s));
+      setAuthState(s => (s === "loading" && !authedRef.current ? "guest" : s));
     }, 3000);
     return () => clearTimeout(t);
   }, []);
@@ -1521,6 +1606,26 @@ function App() {
   if (authState === "loading") return (
     <div style={{...base, justifyContent:"center"}}>
       <div style={{fontSize:18, color:"#6B7280"}}>Загрузка…</div>
+    </div>
+  );
+
+  // Залогинен, но профиль недоступен нигде (первый запуск на новом устройстве без сети).
+  if (authState === "noprofile") return (
+    <div style={{...base, justifyContent:"center"}}>
+      <div style={{fontSize:15, color:"#6B7280", textAlign:"center", padding:"0 28px", lineHeight:1.5, marginBottom:18}}>
+        Вход выполнен, но профиль загрузить не удалось: нет связи с сервером,
+        а на этом устройстве профиль ещё не сохранялся. Проверь интернет и попробуй снова.
+      </div>
+      <div style={{display:"flex", gap:10, justifyContent:"center"}}>
+        <button onClick={() => window.location.reload()}
+          style={{height:44, padding:"0 22px", borderRadius:12, background:PU, color:"#fff", border:"none", fontWeight:700, fontSize:15, cursor:"pointer"}}>
+          Повторить
+        </button>
+        <button onClick={logout}
+          style={{height:44, padding:"0 22px", borderRadius:12, background:"transparent", color:"#6B7280", border:"1.5px solid #D1D5DB", fontSize:15, cursor:"pointer"}}>
+          Выйти
+        </button>
+      </div>
     </div>
   );
 
@@ -1662,16 +1767,7 @@ function AuthScreen() {
         }
       }
     } catch(e) {
-      const map = {
-        "auth/email-already-in-use": "Такое имя уже занято",
-        "auth/wrong-password": "Неверный пароль",
-        "auth/user-not-found": "Пользователь не найден",
-        "auth/invalid-credential": "Неверное имя или пароль",
-        "auth/invalid-login-credentials": "Неверное имя или пароль",
-        "auth/weak-password": "Слабый пароль",
-        "auth/invalid-email": "Недопустимое имя"
-      };
-      setErr(map[e.code] || e.message || "Ошибка");
+      setErr(G.authErrorMessage(e.code, e.message));
     }
     setBusy(false);
   };
