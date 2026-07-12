@@ -1601,11 +1601,42 @@ function App() {
     return () => clearTimeout(t);
   }, []);
 
-  const logout = () => auth.signOut();
+  // Выход без интернета — ловушка: вход обратно возможен только с сетью (пароль
+  // проверяет сервер). Поэтому офлайн-выход требует явного подтверждения.
+  const [confirmLogout, setConfirmLogout] = useState(false);
+  const logout = () => {
+    if (!navigator.onLine) { setConfirmLogout(true); return; }
+    auth.signOut();
+  };
 
   if (authState === "loading") return (
     <div style={{...base, justifyContent:"center"}}>
       <div style={{fontSize:18, color:"#6B7280"}}>Загрузка…</div>
+    </div>
+  );
+
+  const logoutModal = confirmLogout && (
+    <div onClick={() => setConfirmLogout(false)}
+      style={{position:"fixed", inset:0, background:"rgba(17,17,27,0.55)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:100, padding:"max(18px, env(safe-area-inset-top)) 18px max(18px, env(safe-area-inset-bottom))"}}>
+      <div onClick={e => e.stopPropagation()}
+        style={{background:"#fff", borderRadius:18, padding:"22px 20px", width:"100%", maxWidth:340, boxShadow:"0 12px 40px rgba(0,0,0,0.25)"}}>
+        <div style={{fontSize:17, fontWeight:700, color:"#1F2937", marginBottom:10, textAlign:"center"}}>
+          Сейчас нет интернета
+        </div>
+        <div style={{fontSize:13, color:"#6B7280", marginBottom:20, textAlign:"center", lineHeight:1.45}}>
+          Если выйдешь, войти обратно получится только когда появится сеть. Точно выйти?
+        </div>
+        <div style={{display:"flex", flexDirection:"column", gap:10}}>
+          <button onClick={() => setConfirmLogout(false)}
+            style={{height:46, borderRadius:12, background:PU, color:"#fff", border:"none", fontWeight:700, fontSize:15, cursor:"pointer"}}>
+            Остаться
+          </button>
+          <button onClick={() => { setConfirmLogout(false); auth.signOut(); }}
+            style={{height:42, borderRadius:12, background:"transparent", color:RD, border:`1.5px solid ${RD}55`, fontSize:14, cursor:"pointer"}}>
+            Всё равно выйти
+          </button>
+        </div>
+      </div>
     </div>
   );
 
@@ -1626,13 +1657,14 @@ function App() {
           Выйти
         </button>
       </div>
+      {logoutModal}
     </div>
   );
 
   if (authState === "guest") return <AuthScreen />;
-  if (authState === "child") return <ChildApp user={user} profile={profile} onLogout={logout} />;
-  if (authState === "parent") return <ParentApp user={user} profile={profile} onLogout={logout} />;
-  if (authState === "admin") return <AdminApp user={user} profile={profile} onLogout={logout} />;
+  if (authState === "child") return <>{<ChildApp user={user} profile={profile} onLogout={logout} />}{logoutModal}</>;
+  if (authState === "parent") return <>{<ParentApp user={user} profile={profile} onLogout={logout} />}{logoutModal}</>;
+  if (authState === "admin") return <>{<AdminApp user={user} profile={profile} onLogout={logout} />}{logoutModal}</>;
   return null;
 }
 
@@ -1722,6 +1754,9 @@ function AuthScreen() {
     const n = name.trim();
     if (!n) { setErr("Введите имя"); return; }
     if (pass.length < 6) { setErr("Пароль минимум 6 символов"); return; }
+    // Без сети к Firebase даже не ходим: мгновенный понятный ответ вместо
+    // долгого таймаута с английской ошибкой.
+    if (!navigator.onLine) { setErr(G.authErrorMessage("auth/network-request-failed")); return; }
     setBusy(true);
     try {
       const isAdminName = n.toLowerCase() === ADMIN_NAME;
@@ -1810,7 +1845,7 @@ function AuthScreen() {
 
       {!online && (
         <div style={{...W, background:"#FFFBEB", border:"1.5px solid #FCD34D", borderRadius:12, padding:"10px 14px", marginBottom:14, fontSize:13, color:"#92400E", textAlign:"center"}}>
-          📡 Нет сети. Для первого входа требуется интернет — если ты уже заходил раньше, приложение откроется само.
+          📡 Нет интернета. Войти или создать аккаунт без сети нельзя — попробуй, когда сеть появится.
         </div>
       )}
 
