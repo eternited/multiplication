@@ -88,8 +88,29 @@ self.addEventListener('activate', function(e) {
 });
 
 // Страница на каждой загрузке просит докачать недостающую озвучку.
+// 'refresh-shell' — команда механизма обновления: скачать свежий index.html
+// В КЭШ (мимо HTTP-кэша) и доложить об успехе через MessageChannel. Страница
+// перезагружается только после ok:true — так обновление срабатывает даже на
+// еле живой сети (перезагрузка возьмёт уже обновлённый кэш).
 self.addEventListener('message', function(e) {
   if (e.data === 'warm-audio') warmAudioCache();
+  if (e.data && e.data.type === 'refresh-shell') {
+    var port = e.ports && e.ports[0];
+    fetch('./index.html', { cache: 'reload' }).then(function(resp) {
+      if (!resp || resp.status !== 200) throw new Error('bad status');
+      return caches.open(SHELL_CACHE).then(function(cache) {
+        // Навигация обслуживается из ключа '.', прямые запросы — из './index.html':
+        // обновляем ОБА, иначе на слабой сети перезагрузка возьмёт старый корень.
+        return cache.put('./index.html', resp.clone()).then(function() {
+          return cache.put('.', resp.clone());
+        });
+      });
+    }).then(function() {
+      if (port) port.postMessage({ ok: true });
+    }).catch(function() {
+      if (port) port.postMessage({ ok: false });
+    });
+  }
 });
 
 // Network-first с таймаутом для HTML-shell: если сеть не ответила за 3 секунды

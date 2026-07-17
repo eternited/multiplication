@@ -84,6 +84,10 @@
     55%  { transform: scale(1.18) rotate(4deg); }
     100% { transform: scale(1) rotate(0deg); opacity: 1; }
   }
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+  }
   @keyframes glowPulse {
     0%, 100% { box-shadow: 0 0 0 0 rgba(251,191,36,0.55); }
     50%      { box-shadow: 0 0 28px 8px rgba(251,191,36,0.35); }
@@ -1253,6 +1257,28 @@ window.playSound = playSound;
     return hex;
   }
 
+  // ── Механизм обновления приложения ──
+  // ETag с сервера может приходить со слабым префиксом W/ — нормализуем для сравнения.
+  function normalizeEtag(v) {
+    return v ? String(v).replace(/^W\//, "") : null;
+  }
+
+  // Решение: что делать с доступным обновлением.
+  //   ctx: "auto" (главное меню, можно тихо перезагрузить) | "banner" (показать плашку)
+  //        | "hide" (идёт тренировка — не мешать вообще);
+  //   sinceFailMs — сколько мс назад провалилась попытка скачать (null — не проваливалась);
+  //   sinceAutoMs — сколько мс назад было автообновление (null — не было).
+  // Защита от циклов: после недавнего провала или недавнего автообновления — только
+  // плашка (по кнопке пользователь может пробовать сколько угодно).
+  function updateAction(o) {
+    if (!o || !o.available || o.updating) return "none";
+    if (o.ctx === "hide") return "none";
+    if (o.ctx !== "auto") return "banner";
+    if (o.sinceFailMs != null && o.sinceFailMs < 60000) return "banner";
+    if (o.sinceAutoMs != null && o.sinceAutoMs < 120000) return "banner";
+    return "auto";
+  }
+
   // Блок «Моя скорость» на экране результатов: три строки для показа ребёнку.
   // Возвращает null, если времени нет (сессия без ответов) — блок не показывается.
   function answerTimeStats(s) {
@@ -1351,6 +1377,7 @@ window.playSound = playSound;
     validatePasswordChange, sha256Hex,
     isRecoveryFresh, decideRecoveryAction, orchestratePasswordChange,
     freshnessBanner, restoreProfileFlow, authErrorMessage, answerTimeStats,
+    normalizeEtag, updateAction,
   };
   global.GAME = GAME;
   if (typeof module !== "undefined" && module.exports) module.exports = GAME;
@@ -1440,6 +1467,14 @@ function getServerLoadedAt(uid) {
 function setServerLoadedAt(uid, ts) {
   try { localStorage.setItem(serverLoadedAtKey(uid), String(ts)); } catch(e) {}
 }
+
+// Контекст для механизма обновления: экраны сообщают, можно ли сейчас обновляться.
+// "auto" — главное меню, тихая перезагрузка незаметна; "banner" — показать плашку;
+// "hide" — тренировка, не мешать вообще.
+window._updCtx = "banner";
+window._setUpdCtx = v => {
+  if (window._updCtx !== v) { window._updCtx = v; window.dispatchEvent(new Event("updctx")); }
+};
 
 // Запасная копия профиля для офлайн-входа: iOS может вычистить кэш Firestore (IndexedDB),
 // тогда залогиненный пользователь без сети остался бы без профиля. localStorage живучее.
@@ -1613,6 +1648,117 @@ function App() {
     return () => clearTimeout(t);
   }, []);
 
+  // ── Механизм обновления приложения ──────────────────────
+  // Проверка: сравниваем ETag/Last-Modified свежего index.html на сервере (HEAD,
+  // мимо кэшей) с тем, что лежит в кэше Service Worker. Разошлись — есть новая версия.
+  const [updAvail, setUpdAvail] = useState(false);
+  const [updating, setUpdating] = useState(false);
+  const [updCtx, setUpdCtxState] = useState(window._updCtx);
+  const updatingRef = useRef(false);
+  const lastFailRef = useRef(null);
+
+  const checkUpdate = async () => {
+    if (updatingRef.current || !navigator.onLine || document.hidden) return;
+    try {
+      const head = await fetch("./index.html", { method: "HEAD", cache: "no-store" });
+      if (!head.ok) return;
+      const net = G.normalizeEtag(head.headers.get("etag")) || head.headers.get("last-modified");
+      if (!net) return;
+      const cached = await caches.match("./index.html");
+      if (!cached) return; // офлайн-кэш ещё не построен — обновлять нечего
+      const cur = G.normalizeEtag(cached.headers.get("etag")) || cached.headers.get("last-modified");
+      if (cur && net !== cur) setUpdAvail(true);
+    } catch(e) {} // сеть моргнула — проверим в следующий раз
+  };
+
+  // Скачиваем новую версию В КЭШ через Service Worker и перезагружаемся только
+  // после подтверждения. На слабой сети видно оверлей «Обновляю…», зато после
+  // перезагрузки гарантированно новая версия (а не старый кэш по таймауту).
+  const startUpdate = async () => {
+    if (updatingRef.current) return;
+    updatingRef.current = true;
+    setUpdating(true);
+    try {
+      const reg = await navigator.serviceWorker.getRegistration();
+      if (reg) reg.update().catch(() => {}); // заодно попросим браузер проверить sw.js
+    } catch(e) {}
+    const ok = await new Promise((resolve) => {
+      const ctrl = navigator.serviceWorker && navigator.serviceWorker.controller;
+      if (!ctrl) { resolve("no-sw"); return; } // SW нет — просто перезагрузка, хуже не будет
+      const ch = new MessageChannel();
+      const to = setTimeout(() => resolve(false), 30000);
+      ch.port1.onmessage = (e) => { clearTimeout(to); resolve(!!(e.data && e.data.ok)); };
+      ctrl.postMessage({ type: "refresh-shell" }, [ch.port2]);
+    });
+    if (ok === true || ok === "no-sw") {
+      try { localStorage.setItem("xm_lastAutoUpd", String(Date.now())); } catch(e) {}
+      window.location.reload();
+      return;
+    }
+    // Скачать не вышло (сеть пропала) — вернём как было, плашка останется.
+    lastFailRef.current = Date.now();
+    updatingRef.current = false;
+    setUpdating(false);
+  };
+
+  useEffect(() => {
+    const t0 = setTimeout(checkUpdate, 8000); // после старта, не мешая загрузке
+    const iv = setInterval(checkUpdate, 15 * 60 * 1000);
+    const onVis = () => { if (!document.hidden) checkUpdate(); };
+    document.addEventListener("visibilitychange", onVis);
+    const onCtx = () => setUpdCtxState(window._updCtx);
+    window.addEventListener("updctx", onCtx);
+    return () => {
+      clearTimeout(t0); clearInterval(iv);
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("updctx", onCtx);
+    };
+  }, []);
+
+  // Автообновление: только когда контекст «auto» продержался 2.5с (ребёнок реально
+  // на меню и ничего не делает), с защитой от циклов через G.updateAction.
+  useEffect(() => {
+    if (!updAvail || updating) return;
+    const sinceAuto = (() => {
+      try { const v = localStorage.getItem("xm_lastAutoUpd"); return v ? Date.now() - Number(v) : null; }
+      catch(e) { return null; }
+    })();
+    const act = G.updateAction({
+      available: true, updating: updatingRef.current, ctx: updCtx,
+      sinceFailMs: lastFailRef.current == null ? null : Date.now() - lastFailRef.current,
+      sinceAutoMs: sinceAuto,
+    });
+    if (act !== "auto") return;
+    const t = setTimeout(() => { if (window._updCtx === "auto") startUpdate(); }, 2500);
+    return () => clearTimeout(t);
+  }, [updAvail, updCtx, updating]);
+
+  const updateUI = (
+    <>
+      {updAvail && !updating && updCtx !== "hide" && (
+        <div style={{position:"fixed", left:0, right:0, bottom:0, zIndex:90, display:"flex", justifyContent:"center",
+          padding:"0 14px calc(14px + env(safe-area-inset-bottom))", pointerEvents:"none"}}>
+          <div style={{display:"flex", alignItems:"center", gap:12, background:"#1F2937", color:"#fff",
+            borderRadius:14, padding:"10px 10px 10px 16px", boxShadow:"0 8px 24px rgba(0,0,0,0.28)", pointerEvents:"auto", maxWidth:400, width:"100%"}}>
+            <span style={{flex:1, fontSize:13.5}}>🔄 Появилась новая версия</span>
+            <button onClick={startUpdate}
+              style={{height:38, padding:"0 16px", borderRadius:10, border:"none", background:PU, color:"#fff", fontSize:14, fontWeight:700, cursor:"pointer"}}>
+              Обновить
+            </button>
+          </div>
+        </div>
+      )}
+      {updating && (
+        <div style={{position:"fixed", inset:0, zIndex:300, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center",
+          background:"rgba(246,245,255,0.97)", padding:24, textAlign:"center"}}>
+          <div style={{fontSize:52, marginBottom:16, animation:"spin 1.2s linear infinite", display:"inline-block"}}>🔄</div>
+          <div style={{fontSize:18, fontWeight:800, color:PU, marginBottom:8}}>Обновляю приложение…</div>
+          <div style={{fontSize:13.5, color:"#6B7280", lineHeight:1.5}}>Скачиваю новую версию.<br/>Пара секунд — и продолжим!</div>
+        </div>
+      )}
+    </>
+  );
+
   // Выход без интернета — ловушка: вход обратно возможен только с сетью (пароль
   // проверяет сервер). Поэтому офлайн-выход требует явного подтверждения.
   const [confirmLogout, setConfirmLogout] = useState(false);
@@ -1670,13 +1816,14 @@ function App() {
         </button>
       </div>
       {logoutModal}
+      {updateUI}
     </div>
   );
 
-  if (authState === "guest") return <AuthScreen />;
-  if (authState === "child") return <>{<ChildApp user={user} profile={profile} onLogout={logout} />}{logoutModal}</>;
-  if (authState === "parent") return <>{<ParentApp user={user} profile={profile} onLogout={logout} />}{logoutModal}</>;
-  if (authState === "admin") return <>{<AdminApp user={user} profile={profile} onLogout={logout} />}{logoutModal}</>;
+  if (authState === "guest") return <>{<AuthScreen />}{updateUI}</>;
+  if (authState === "child") return <>{<ChildApp user={user} profile={profile} onLogout={logout} />}{logoutModal}{updateUI}</>;
+  if (authState === "parent") return <>{<ParentApp user={user} profile={profile} onLogout={logout} />}{logoutModal}{updateUI}</>;
+  if (authState === "admin") return <>{<AdminApp user={user} profile={profile} onLogout={logout} />}{logoutModal}{updateUI}</>;
   return null;
 }
 
@@ -2002,6 +2149,13 @@ function ChildApp({ user, profile, onLogout }) {
     try { localStorage.setItem("xm_showSpeed", nv ? "1" : "0"); } catch(e) {}
     return nv;
   });
+
+  // Контекст для механизма обновления: на главном меню можно обновляться тихо,
+  // в тренировке — не мешать вообще, на остальных экранах — плашка.
+  useEffect(() => {
+    window._setUpdCtx(sc === "train" ? "hide" : (sc === "home" && !settingsOpen) ? "auto" : "banner");
+    return () => window._setUpdCtx("banner");
+  }, [sc, settingsOpen]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [online, setOnline] = useState(typeof navigator === "undefined" ? true : navigator.onLine);
@@ -3063,6 +3217,12 @@ function ParentApp({ user, profile, onLogout }) {
     }
   };
   const closeChild = () => { openUidRef.current = null; setSelected(null); setChildData(null); };
+
+  // Контекст обновления: на списке детей можно обновляться тихо, в статистике — плашка.
+  useEffect(() => {
+    window._setUpdCtx(selected ? "banner" : "auto");
+    return () => window._setUpdCtx("banner");
+  }, [selected]);
 
   const doUnlink = async () => {
     if (!unlinkTarget) return;
