@@ -10,14 +10,24 @@
 <title>Таблица умножения</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  html, body { height: 100%; overflow: hidden; overscroll-behavior: none; }
-  body { background: #F5F3FF; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
-  #root { height: 100%; overflow-y: auto; overscroll-behavior-y: contain; -webkit-overflow-scrolling: touch; }
+  html { height: 100%; overscroll-behavior: none; }
+  body {
+    height: 100%; overflow: hidden;
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    overscroll-behavior: none; touch-action: none;
+    background: #F5F3FF; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+  #root { height: 100%; overflow-y: auto; overscroll-behavior-y: contain; touch-action: pan-y; -webkit-overflow-scrolling: touch; }
   button:active { opacity: 0.75; transform: scale(0.97); }
   input { -webkit-appearance: none; appearance: none; }
 </style>
 </head>
 <body>
+<script>
+document.addEventListener('touchmove', function(e) {
+  if (!e.target.closest('#root')) e.preventDefault();
+}, { passive: false });
+</script>
 <div id="root"></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
@@ -34,76 +44,87 @@ const playSound = (type) => {
     g.connect(ctx.destination);
     const o = ctx.createOscillator();
     o.connect(g);
-
     if (type === "num") {
-      // Мягкий средний блип
       o.type = "sine";
       o.frequency.setValueAtTime(440, ctx.currentTime);
       o.frequency.exponentialRampToValueAtTime(330, ctx.currentTime + 0.07);
       g.gain.setValueAtTime(0.15, ctx.currentTime);
       g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.09);
-      o.start(ctx.currentTime);
-      o.stop(ctx.currentTime + 0.09);
+      o.start(ctx.currentTime); o.stop(ctx.currentTime + 0.09);
     } else if (type === "del") {
-      // Lower dull thud
       o.type = "sine";
       o.frequency.setValueAtTime(320, ctx.currentTime);
       o.frequency.exponentialRampToValueAtTime(180, ctx.currentTime + 0.1);
       g.gain.setValueAtTime(0.22, ctx.currentTime);
       g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.12);
-      o.start(ctx.currentTime);
-      o.stop(ctx.currentTime + 0.12);
+      o.start(ctx.currentTime); o.stop(ctx.currentTime + 0.12);
     } else if (type === "eq") {
-      // Двойной восходящий перезвон — правильный ответ
       [0, 0.1].forEach((delay, i) => {
-        const o2 = ctx.createOscillator();
-        const g2 = ctx.createGain();
+        const o2 = ctx.createOscillator(), g2 = ctx.createGain();
         o2.connect(g2); g2.connect(ctx.destination);
         o2.type = "triangle";
         o2.frequency.setValueAtTime(i === 0 ? 660 : 880, ctx.currentTime + delay);
         g2.gain.setValueAtTime(0.20, ctx.currentTime + delay);
         g2.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + delay + 0.15);
-        o2.start(ctx.currentTime + delay);
-        o2.stop(ctx.currentTime + delay + 0.15);
+        o2.start(ctx.currentTime + delay); o2.stop(ctx.currentTime + delay + 0.15);
       });
       return;
     } else if (type === "wrong") {
-      // Нисходящий грустный звук — неправильный ответ
       o.type = "sawtooth";
       o.frequency.setValueAtTime(300, ctx.currentTime);
       o.frequency.exponentialRampToValueAtTime(120, ctx.currentTime + 0.35);
       g.gain.setValueAtTime(0.18, ctx.currentTime);
       g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.38);
-      o.start(ctx.currentTime);
-      o.stop(ctx.currentTime + 0.38);
+      o.start(ctx.currentTime); o.stop(ctx.currentTime + 0.38);
       return;
     }
   } catch(e) {}
 };
-
 window.playSound = playSound;
 </script>
 <script type="text/babel">
 const { useState, useEffect, useRef } = React;
 
-const KEY = "mt_v3", PPIN = "1234";
+const PPIN     = "1234";
 const SES_OPTS = [5, 10, 15, 20];
-const NUMS = [2,3,4,5,6,7,8,9,10];
+const NUMS     = [2,3,4,5,6,7,8,9,10];
 const PU = "#534AB7", PL = "#EEEDFE", GR = "#16A34A", RD = "#DC2626";
 
-const ld = () => { try { return JSON.parse(localStorage.getItem(KEY)) || {facts:{},sessions:[]} } catch(e) { return {facts:{},sessions:[]} }};
-const sv = d => { try { localStorage.setItem(KEY, JSON.stringify(d)) } catch(e) {}};
-const wt = f => !f || f.c+f.w===0 ? 0.65 : Math.max(0.1, 1 - f.c/(f.c+f.w+0.5));
+// ── Storage ───────────────────────────────────────────────
+const ACCS_KEY = "mt_accounts";
+const dataKey  = uid => `mt_data_${uid}`;
+const loadAccs = () => { try { return JSON.parse(localStorage.getItem(ACCS_KEY)) || [] } catch { return [] } };
+const saveAccs = a  => { try { localStorage.setItem(ACCS_KEY, JSON.stringify(a)) } catch {} };
+const svData   = (uid, d) => { try { localStorage.setItem(dataKey(uid), JSON.stringify(d)) } catch {} };
 
+// ── API ───────────────────────────────────────────────────
+const apiLogin = async name => {
+  const r = await fetch('/api/login', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name})
+  });
+  if (!r.ok) throw new Error('server error');
+  return r.json(); // {token, name, uid, data}
+};
+
+const apiSave = (token, data) =>
+  fetch('/api/data', {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json', 'Authorization': `Bearer ${token}`},
+    body: JSON.stringify({data})
+  }).catch(() => {});
+
+// ── Algorithm helpers ─────────────────────────────────────
+const wt   = f => !f || f.c+f.w===0 ? 0.65 : Math.max(0.1, 1 - f.c/(f.c+f.w+0.5));
 const pick = (tbs, facts) => {
   const pool = tbs.flatMap(a => NUMS.map(b => ({a, b, k:`${a}x${b}`})));
-  const ws = pool.map(p => wt(facts[p.k]));
-  const sum = ws.reduce((s,w) => s+w, 0);
+  const ws   = pool.map(p => wt(facts[p.k]));
+  const sum  = ws.reduce((s,w) => s+w, 0);
   let r = Math.random() * sum;
   for (let i=0; i<pool.length; i++) { r -= ws[i]; if (r<=0) return pool[i]; }
   return pool[pool.length-1];
 };
-
 const hc = f => {
   if (!f || f.c+f.w===0) return {bg:"#E5E7EB", tx:"#9CA3AF"};
   const a = f.c/(f.c+f.w);
@@ -112,52 +133,88 @@ const hc = f => {
   if (a >= 0.40) return {bg:"#FCA5A5", tx:"#7F1D1D"};
   return {bg:"#F87171", tx:"#7F1D1D"};
 };
-
 const fmtD = ts => new Date(ts).toLocaleDateString("ru-RU", {day:"numeric", month:"short", hour:"2-digit", minute:"2-digit"});
-const fmtS = s => s < 60 ? `${s}с` : `${Math.floor(s/60)}м ${s%60}с`;
+const fmtS = s  => s < 60 ? `${s}с` : `${Math.floor(s/60)}м ${s%60}с`;
 
+// ── App ───────────────────────────────────────────────────
 function App() {
-  const [sc, setSc] = useState("home");
-  const [data, setData] = useState(ld);
-  const [nm, setNm] = useState(() => ld().name || "");
-  const [tbs, setTbs] = useState([2,3,4,5]);
-  const [ses, setSes] = useState(20);
+  // Account state
+  const [accounts, setAccounts] = useState(loadAccs);
+  const [cu, setCU]             = useState(null); // {name, token, uid}
+  const cuRef                   = useRef(null);
+  const [logging, setLogging]   = useState(false);
+  const [loginErr, setLoginErr] = useState("");
+  const [newName, setNewName]   = useState("");
+
+  // Training state
+  const [sc, setSc]     = useState(() => loadAccs().length > 0 ? "accounts" : "new_acct");
+  const [data, setData] = useState({facts:{}, sessions:[]});
+  const [tbs, setTbs]   = useState([2,3,4,5]);
+  const [ses, setSes]   = useState(20);
   const [fact, setFact] = useState(null);
-  const [ans, setAns] = useState("");
-  const [ph, setPh] = useState("q");
+  const [ans, setAns]   = useState("");
+  const [ph, setPh]     = useState("q");
   const [sCor, setSCor] = useState(0);
   const [sTot, setSTot] = useState(0);
-  const t0 = useRef(null);
-  const qTime = useRef(null);
+  const t0     = useRef(null);
+  const qTime  = useRef(null);
   const sTimes = useRef([]);
+
+  // Parent stats state
   const [pinI, setPinI] = useState("");
   const [pinE, setPinE] = useState(false);
 
-  const ud = d => { setData(d); sv(d); };
+  cuRef.current = cu;
+
+  const ud = d => { setData(d); if (cuRef.current) svData(cuRef.current.uid, d); };
+
   const R = useRef({});
   R.current = {ph, ans, fact, sCor, sTot, tbs, data, ses};
   const sf = useRef(null), pf = useRef(null);
 
+  // ── Login ─────────────────────────────────────────────
+  const doLogin = async name => {
+    if (logging) return;
+    setLogging(true); setLoginErr("");
+    try {
+      const {token, name: sName, uid, data: sData} = await apiLogin(name.trim());
+      const acc     = {name: sName, token, uid};
+      const updated = [acc, ...accounts.filter(a => a.name.toLowerCase() !== sName.toLowerCase())];
+      setAccounts(updated); saveAccs(updated);
+      setCU(acc); cuRef.current = acc;
+      setData(sData || {facts:{}, sessions:[]});
+      setSc("home");
+    } catch {
+      setLoginErr("Не удалось подключиться к серверу");
+    } finally { setLogging(false); }
+  };
+
+  const removeAcct = (name, e) => {
+    e.stopPropagation();
+    const updated = accounts.filter(a => a.name !== name);
+    setAccounts(updated); saveAccs(updated);
+    if (!updated.length) setSc("new_acct");
+  };
+
+  // ── Keypad ────────────────────────────────────────────
   pf.current = d => {
     if (R.current.ph !== "q") return;
-    if (d === "del") {
-      window.playSound("del");
-      setAns(a => a.slice(0,-1));
-      return;
-    }
+    if (d === "del") { window.playSound("del"); setAns(a => a.slice(0,-1)); return; }
     if (R.current.ans.length >= 3) return;
     window.playSound("num");
     setAns(a => a + d);
   };
 
+  // ── Submit answer ─────────────────────────────────────
   sf.current = () => {
     const {ph, ans, fact, sCor, sTot, tbs, data, ses} = R.current;
     if (ph !== "q" || !ans || !fact) return;
     const elapsed = qTime.current ? (Date.now() - qTime.current) / 1000 : 0;
     sTimes.current.push(elapsed);
     const ok = parseInt(ans) === fact.a * fact.b;
-    window.playSound(ok ? "eq" : "wrong");    const nf = {...data.facts};
-    const o = nf[fact.k] || {c:0, w:0};
+    window.playSound(ok ? "eq" : "wrong");
+    const nf = {...data.facts};
+    const o  = nf[fact.k] || {c:0, w:0};
     nf[fact.k] = {c: o.c+(ok?1:0), w: o.w+(ok?0:1), t: Date.now()};
     const nT = sTot+1, nC = sCor+(ok?1:0);
     setSTot(nT); setSCor(nC); setPh(ok ? "ok" : "err");
@@ -165,12 +222,14 @@ function App() {
     ud(nd);
     setTimeout(() => {
       if (nT >= ses) {
-        const times = sTimes.current;
+        const times   = sTimes.current;
         const avgTime = times.length ? Math.round(times.reduce((a,b)=>a+b,0)/times.length*10)/10 : null;
         const minTime = times.length ? Math.round(Math.min(...times)*10)/10 : null;
         const maxTime = times.length ? Math.round(Math.max(...times)*10)/10 : null;
         const s = {date: Date.now(), dur: Math.round((Date.now()-t0.current)/1000), correct: nC, total: nT, tables: [...tbs], avgTime, minTime, maxTime};
-        ud({...nd, sessions: [s, ...(nd.sessions||[])].slice(0,30)});
+        const finalData = {...nd, sessions: [s, ...(nd.sessions||[])].slice(0,30)};
+        ud(finalData);
+        if (cuRef.current) apiSave(cuRef.current.token, finalData);
         setSc("results");
       } else {
         setFact(pick(tbs, nf)); setAns(""); setPh("q");
@@ -191,33 +250,109 @@ function App() {
   }, [sc]);
 
   const startTrain = () => {
-    if (!tbs.length) return;
-    const d = {...data, name: nm.trim() || "Ученик"};
-    ud(d); t0.current = Date.now();
+    if (!tbs.length || !cu) return;
+    t0.current = Date.now();
     sTimes.current = [];
     setSCor(0); setSTot(0);
-    setFact(pick(tbs, d.facts));
+    setFact(pick(tbs, data.facts));
     setAns(""); setPh("q"); setSc("train");
     qTime.current = Date.now();
   };
 
-  const W = {width:"100%", maxWidth:420, boxSizing:"border-box"};
+  const W    = {width:"100%", maxWidth:420, boxSizing:"border-box"};
   const base = {minHeight:"100vh", background:"#F5F3FF", display:"flex", flexDirection:"column", alignItems:"center", padding:"24px 16px 48px"};
+
+  // ── ACCOUNTS ──────────────────────────────────────────
+  if (sc === "accounts") return (
+    <div style={base}>
+      <div style={{fontSize:52, marginBottom:4, textAlign:"center"}}>✖️</div>
+      <h1 style={{fontSize:26, fontWeight:700, color:PU, margin:"0 0 2px", textAlign:"center"}}>Таблица умножения</h1>
+      <p style={{fontSize:14, color:"#6B7280", margin:"0 0 28px"}}>Кто тренируется?</p>
+
+      <div style={{...W, display:"flex", flexDirection:"column", gap:10, marginBottom:16}}>
+        {accounts.map(a => (
+          <div key={a.name} style={{display:"flex", alignItems:"center", gap:8}}>
+            <button onClick={() => doLogin(a.name)} disabled={logging}
+              style={{flex:1, height:56, borderRadius:16, background:"#fff", border:"1.5px solid #E5E7EB",
+                fontSize:17, fontWeight:600, color:"#1F2937", cursor: logging ? "default" : "pointer",
+                textAlign:"left", padding:"0 20px", boxShadow:"0 2px 6px rgba(0,0,0,0.06)", opacity: logging ? 0.6 : 1}}>
+              {a.name}
+            </button>
+            <button onClick={e => removeAcct(a.name, e)}
+              style={{width:40, height:40, borderRadius:12, background:"#F3F4F6", border:"none",
+                color:"#9CA3AF", fontSize:20, cursor:"pointer", flexShrink:0, lineHeight:1}}>
+              ×
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {loginErr && <div style={{...W, fontSize:13, color:RD, marginBottom:12, textAlign:"center"}}>{loginErr}</div>}
+
+      <button onClick={() => { setNewName(""); setLoginErr(""); setSc("new_acct"); }}
+        style={{...W, height:50, borderRadius:14, background:"transparent", color:PU,
+          fontSize:15, fontWeight:600, border:`2px solid ${PU}`, cursor:"pointer"}}>
+        + Добавить аккаунт
+      </button>
+    </div>
+  );
+
+  // ── NEW ACCOUNT ───────────────────────────────────────
+  if (sc === "new_acct") return (
+    <div style={{...base, justifyContent:"center"}}>
+      <div style={{fontSize:52, marginBottom:12, textAlign:"center"}}>✖️</div>
+      <h1 style={{fontSize:22, fontWeight:700, color:PU, margin:"0 0 8px", textAlign:"center"}}>Таблица умножения</h1>
+      <p style={{fontSize:14, color:"#6B7280", margin:"0 0 28px", textAlign:"center"}}>Введи своё имя, чтобы начать</p>
+
+      <div style={{...W, marginBottom:14}}>
+        <input
+          value={newName}
+          onChange={e => { setNewName(e.target.value); setLoginErr(""); }}
+          onKeyDown={e => e.key === "Enter" && newName.trim() && doLogin(newName)}
+          placeholder="Например, Вася"
+          maxLength={50}
+          autoFocus
+          style={{width:"100%", padding:"14px 16px", borderRadius:14,
+            border:`1.5px solid ${loginErr ? RD : "#D1D5DB"}`,
+            fontSize:17, outline:"none", background:"#fff"}}
+        />
+        {loginErr && <div style={{fontSize:13, color:RD, marginTop:6}}>{loginErr}</div>}
+      </div>
+
+      <button onClick={() => newName.trim() && doLogin(newName)} disabled={!newName.trim() || logging}
+        style={{...W, height:56, borderRadius:16,
+          background: newName.trim() && !logging ? PU : "#9CA3AF",
+          color:"#fff", fontSize:18, fontWeight:700, border:"none",
+          cursor: newName.trim() && !logging ? "pointer" : "default", marginBottom:12}}>
+        {logging ? "Загрузка..." : "Войти ▶"}
+      </button>
+
+      {accounts.length > 0 && (
+        <button onClick={() => { setLoginErr(""); setSc("accounts"); }}
+          style={{...W, height:44, borderRadius:13, background:"transparent", color:"#6B7280",
+            fontSize:14, border:"1.5px solid #D1D5DB", cursor:"pointer"}}>
+          ← Выбрать аккаунт
+        </button>
+      )}
+    </div>
+  );
 
   // ── HOME ──────────────────────────────────────────────
   if (sc === "home") return (
     <div style={base}>
-      <div style={{fontSize:52, marginBottom:4, textAlign:"center"}}>✖️</div>
-      <h1 style={{fontSize:26, fontWeight:700, color:PU, margin:"0 0 2px", textAlign:"center"}}>Таблица умножения</h1>
-      <p style={{fontSize:14, color:"#6B7280", margin:"0 0 28px"}}>Умная тренировка</p>
-
-      <div style={{...W, marginBottom:18}}>
-        <div style={{fontSize:13, color:"#6B7280", marginBottom:7}}>Имя ученика</div>
-        <input value={nm} onChange={e => setNm(e.target.value)} placeholder="Например, Вася"
-          style={{width:"100%", padding:"12px 14px", borderRadius:12, border:"1.5px solid #D1D5DB", fontSize:16, outline:"none", background:"#fff"}} />
+      <div style={{...W, display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:22}}>
+        <div>
+          <div style={{fontSize:12, color:"#9CA3AF", marginBottom:1}}>Привет,</div>
+          <div style={{fontSize:22, fontWeight:700, color:PU}}>{cu?.name}</div>
+        </div>
+        <button onClick={() => setSc("accounts")}
+          style={{height:34, padding:"0 14px", borderRadius:9, background:"transparent",
+            color:"#6B7280", fontSize:13, border:"1.5px solid #D1D5DB", cursor:"pointer"}}>
+          Сменить
+        </button>
       </div>
 
-      <div style={{...W, marginBottom:30}}>
+      <div style={{...W, marginBottom:22}}>
         <div style={{fontSize:13, color:"#6B7280", marginBottom:9}}>Таблицы для тренировки</div>
         <div style={{display:"flex", flexWrap:"wrap", gap:9}}>
           {NUMS.map(n => {
@@ -225,7 +360,10 @@ function App() {
             return (
               <button key={n}
                 onClick={() => setTbs(p => s ? (p.length > 1 ? p.filter(x => x!==n) : p) : [...p, n])}
-                style={{width:54, height:54, borderRadius:13, border: s ? `2.5px solid ${PU}` : "1.5px solid #D1D5DB", background: s ? PL : "#fff", color: s ? PU : "#6B7280", fontWeight: s ? 700 : 400, fontSize:17, cursor:"pointer", transition:"all 0.15s"}}>
+                style={{width:54, height:54, borderRadius:13,
+                  border: s ? `2.5px solid ${PU}` : "1.5px solid #D1D5DB",
+                  background: s ? PL : "#fff", color: s ? PU : "#6B7280",
+                  fontWeight: s ? 700 : 400, fontSize:17, cursor:"pointer", transition:"all 0.15s"}}>
                 ×{n}
               </button>
             );
@@ -233,14 +371,17 @@ function App() {
         </div>
       </div>
 
-      <div style={{...W, marginBottom:22}}>
+      <div style={{...W, marginBottom:24}}>
         <div style={{fontSize:13, color:"#6B7280", marginBottom:9}}>Количество примеров</div>
         <div style={{display:"flex", gap:9}}>
           {SES_OPTS.map(n => {
             const sel = ses === n;
             return (
               <button key={n} onClick={() => setSes(n)}
-                style={{flex:1, height:48, borderRadius:13, border: sel ? `2.5px solid ${PU}` : "1.5px solid #D1D5DB", background: sel ? PL : "#fff", color: sel ? PU : "#6B7280", fontWeight: sel ? 700 : 400, fontSize:16, cursor:"pointer", transition:"all 0.15s"}}>
+                style={{flex:1, height:48, borderRadius:13,
+                  border: sel ? `2.5px solid ${PU}` : "1.5px solid #D1D5DB",
+                  background: sel ? PL : "#fff", color: sel ? PU : "#6B7280",
+                  fontWeight: sel ? 700 : 400, fontSize:16, cursor:"pointer", transition:"all 0.15s"}}>
                 {n}
               </button>
             );
@@ -249,11 +390,14 @@ function App() {
       </div>
 
       <button onClick={startTrain}
-        style={{...W, height:56, borderRadius:16, background: tbs.length ? PU : "#9CA3AF", color:"#fff", fontSize:18, fontWeight:700, border:"none", cursor:"pointer", marginBottom:12, transition:"background 0.2s"}}>
+        style={{...W, height:56, borderRadius:16, background: tbs.length ? PU : "#9CA3AF",
+          color:"#fff", fontSize:18, fontWeight:700, border:"none", cursor:"pointer",
+          marginBottom:12, transition:"background 0.2s"}}>
         Начать тренировку ▶
       </button>
       <button onClick={() => { setPinI(""); setPinE(false); setSc("parent_pin"); }}
-        style={{...W, height:46, borderRadius:13, background:"transparent", color:"#6B7280", fontSize:14, border:"1.5px solid #D1D5DB", cursor:"pointer"}}>
+        style={{...W, height:46, borderRadius:13, background:"transparent", color:"#6B7280",
+          fontSize:14, border:"1.5px solid #D1D5DB", cursor:"pointer"}}>
         Статистика для родителей
       </button>
     </div>
@@ -261,8 +405,8 @@ function App() {
 
   // ── TRAIN ─────────────────────────────────────────────
   if (sc === "train" && fact) {
-    const pct = (sTot / ses) * 100;
-    const bgMap = {ok:"#F0FDF4", err:"#FFF1F2", q:"#F5F3FF"};
+    const pct     = (sTot / ses) * 100;
+    const bgMap   = {ok:"#F0FDF4", err:"#FFF1F2", q:"#F5F3FF"};
     const numRows = [["1","2","3"],["4","5","6"],["7","8","9"],["del","0","ok"]];
     return (
       <div style={{...base, background: bgMap[ph]||bgMap.q, transition:"background 0.3s"}}>
@@ -280,7 +424,8 @@ function App() {
           <div style={{fontSize:50, fontWeight:800, color:"#1F2937", letterSpacing:3, marginBottom:22}}>
             {fact.a} × {fact.b} = ?
           </div>
-          <div style={{height:68, display:"flex", alignItems:"center", justifyContent:"center", background:"#F9FAFB", borderRadius:14, fontSize:38, fontWeight:800,
+          <div style={{height:68, display:"flex", alignItems:"center", justifyContent:"center",
+            background:"#F9FAFB", borderRadius:14, fontSize:38, fontWeight:800,
             color: ph==="ok" ? GR : ph==="err" ? RD : PU,
             border: ph==="ok" ? `2.5px solid ${GR}` : ph==="err" ? `2.5px solid ${RD}` : `2.5px solid ${PU}`,
             transition:"all 0.25s"}}>
@@ -294,19 +439,24 @@ function App() {
           {numRows.flat().map((d, i) => {
             if (d === "ok") return (
               <button key="ok" onClick={() => sf.current()}
-                style={{height:72, borderRadius:16, background: ans ? PU : "#E5E7EB", color: ans ? "#fff" : "#9CA3AF", fontSize:30, fontWeight:800, border:"none", cursor: ans ? "pointer" : "default", transition:"all 0.2s"}}>
+                style={{height:72, borderRadius:16, background: ans ? PU : "#E5E7EB",
+                  color: ans ? "#fff" : "#9CA3AF", fontSize:30, fontWeight:800, border:"none",
+                  cursor: ans ? "pointer" : "default", transition:"all 0.2s"}}>
                 =
               </button>
             );
             if (d === "del") return (
               <button key="del" onClick={() => pf.current("del")}
-                style={{height:72, borderRadius:16, background:"#E5E7EB", color:"#4B5563", fontSize:22, fontWeight:600, border:"none", cursor:"pointer"}}>
+                style={{height:72, borderRadius:16, background:"#E5E7EB", color:"#4B5563",
+                  fontSize:22, fontWeight:600, border:"none", cursor:"pointer"}}>
                 ←
               </button>
             );
             return (
               <button key={d} onClick={() => pf.current(d)}
-                style={{height:72, borderRadius:16, background:"#fff", color:"#1F2937", fontSize:30, fontWeight:700, border:"1.5px solid #E5E7EB", cursor:"pointer", boxShadow:"0 2px 6px rgba(0,0,0,0.07)"}}>
+                style={{height:72, borderRadius:16, background:"#fff", color:"#1F2937",
+                  fontSize:30, fontWeight:700, border:"1.5px solid #E5E7EB", cursor:"pointer",
+                  boxShadow:"0 2px 6px rgba(0,0,0,0.07)"}}>
                 {d}
               </button>
             );
@@ -318,9 +468,9 @@ function App() {
 
   // ── RESULTS ───────────────────────────────────────────
   if (sc === "results") {
-    const pct = Math.round((sCor / ses) * 100);
-    const st = pct >= 90 ? 3 : pct >= 70 ? 2 : 1;
-    const msg = pct >= 90 ? "Отлично!" : pct >= 70 ? "Хорошо! Так держать!" : "Продолжай — всё получится!";
+    const pct  = Math.round((sCor / ses) * 100);
+    const st   = pct >= 90 ? 3 : pct >= 70 ? 2 : 1;
+    const msg  = pct >= 90 ? "Отлично!" : pct >= 70 ? "Хорошо! Так держать!" : "Продолжай — всё получится!";
     const weak = Object.entries(data.facts || {})
       .filter(([k, f]) => { const [a] = k.split("x").map(Number); return tbs.includes(a) && f.c+f.w > 0 && f.c/(f.c+f.w) < 0.5; })
       .sort((a, b) => a[1].c/(a[1].c+a[1].w) - b[1].c/(b[1].c+b[1].w)).slice(0, 6);
@@ -378,7 +528,9 @@ function App() {
                     else { setPinE(true); setTimeout(() => { setPinI(""); setPinE(false); }, 900); }
                   }
                 }}
-                style={{height:68, borderRadius:14, background:"#fff", color:"#1F2937", fontSize: d==="del" ? 20 : 28, fontWeight:700, border:"1.5px solid #E5E7EB", cursor:"pointer", boxShadow:"0 2px 6px rgba(0,0,0,0.07)"}}>
+                style={{height:68, borderRadius:14, background:"#fff", color:"#1F2937",
+                  fontSize: d==="del" ? 20 : 28, fontWeight:700, border:"1.5px solid #E5E7EB",
+                  cursor:"pointer", boxShadow:"0 2px 6px rgba(0,0,0,0.07)"}}>
                   {d === "del" ? "←" : d}
                 </button>
               );
@@ -395,20 +547,22 @@ function App() {
 
   // ── PARENT STATS ──────────────────────────────────────
   if (sc === "parent") {
-    const sess = data.sessions || [];
-    const facts = data.facts || {};
-    const allQ = sess.reduce((s,x) => s+x.total, 0);
-    const allC = sess.reduce((s,x) => s+x.correct, 0);
-    const acc = allQ > 0 ? Math.round(allC/allQ*100) : 0;
+    const sess   = data.sessions || [];
+    const facts  = data.facts || {};
+    const allQ   = sess.reduce((s,x) => s+x.total, 0);
+    const allC   = sess.reduce((s,x) => s+x.correct, 0);
+    const acc    = allQ > 0 ? Math.round(allC/allQ*100) : 0;
     const topBad = Object.entries(facts)
       .filter(([,f]) => f.c+f.w > 2)
       .sort((a,b) => a[1].c/(a[1].c+a[1].w) - b[1].c/(b[1].c+b[1].w))
       .slice(0, 5);
-
     return (
       <div style={base}>
         <div style={{...W, display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:18}}>
-          <h2 style={{fontSize:22, fontWeight:700, margin:0, color:PU}}>Статистика</h2>
+          <div>
+            <h2 style={{fontSize:22, fontWeight:700, margin:0, color:PU}}>Статистика</h2>
+            <div style={{fontSize:12, color:"#9CA3AF"}}>{cu?.name}</div>
+          </div>
           <button onClick={() => setSc("home")} style={{height:36, padding:"0 16px", borderRadius:9, background:"transparent", color:"#6B7280", fontSize:14, border:"1.5px solid #D1D5DB", cursor:"pointer"}}>Выход</button>
         </div>
 
