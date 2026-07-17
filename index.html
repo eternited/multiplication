@@ -1253,6 +1253,18 @@ window.playSound = playSound;
     return hex;
   }
 
+  // Блок «Моя скорость» на экране результатов: три строки для показа ребёнку.
+  // Возвращает null, если времени нет (сессия без ответов) — блок не показывается.
+  function answerTimeStats(s) {
+    if (!s || s.avgTime == null) return null;
+    const f = x => String(x).replace(".", ",") + " с";
+    return [
+      { emoji: "⏱", label: "Средний ответ", value: f(s.avgTime) },
+      { emoji: "🚀", label: "Самый быстрый", value: f(s.minTime) },
+      { emoji: "🐢", label: "Самый долгий", value: f(s.maxTime) },
+    ];
+  }
+
   // Восстановление профиля при запуске для УЖЕ залогиненного пользователя.
   // Железное правило: сетевые проблемы не должны выкидывать на форму входа.
   // Чистая функция с инжектируемыми шагами (тестируется без Firebase):
@@ -1338,7 +1350,7 @@ window.playSound = playSound;
     groupRegistrationsByDay, filterUsers, sortUsers, paginate,
     validatePasswordChange, sha256Hex,
     isRecoveryFresh, decideRecoveryAction, orchestratePasswordChange,
-    freshnessBanner, restoreProfileFlow, authErrorMessage,
+    freshnessBanner, restoreProfileFlow, authErrorMessage, answerTimeStats,
   };
   global.GAME = GAME;
   if (typeof module !== "undefined" && module.exports) module.exports = GAME;
@@ -1980,6 +1992,16 @@ function ChildApp({ user, profile, onLogout }) {
   const [xpPop, setXpPop] = useState(null);
   const [resultData, setResultData] = useState(null);
   const [showLevelUp, setShowLevelUp] = useState(false);
+  // «Моя скорость» на экране результатов: выбор запоминается — кто раскрыл,
+  // у того блок открыт после каждой тренировки, пока сам не свернёт.
+  const [showSpeed, setShowSpeed] = useState(() => {
+    try { return localStorage.getItem("xm_showSpeed") === "1"; } catch(e) { return false; }
+  });
+  const toggleSpeed = () => setShowSpeed(v => {
+    const nv = !v;
+    try { localStorage.setItem("xm_showSpeed", nv ? "1" : "0"); } catch(e) {}
+    return nv;
+  });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [online, setOnline] = useState(typeof navigator === "undefined" ? true : navigator.onLine);
@@ -2194,6 +2216,7 @@ function ChildApp({ user, profile, onLogout }) {
       sessionXP: result.sessionXP, completionBonus: result.completionBonus,
       newAch: result.newAchievements, totalXP: result.newTotalXP,
       levelUp: result.leveledUp, newRank: result.newRank,
+      times: result.session, // avgTime/minTime/maxTime для блока «Моя скорость»
     });
     setShowLevelUp(result.leveledUp);
     setSc("results");
@@ -2673,6 +2696,30 @@ function ChildApp({ user, profile, onLogout }) {
           <div style={{fontSize:22, fontWeight:700, color:PU, marginBottom:10}}>{msg}</div>
           <div style={{fontSize:40, fontWeight:800, color:"#1F2937", marginBottom:4}}>{sCor} / {ses}</div>
           <div style={{fontSize:15, color:"#6B7280"}}>правильных ответов ({pct}%)</div>
+          {(() => {
+            const speed = resultData && G.answerTimeStats(resultData.times);
+            if (!speed) return null;
+            return (
+              <div style={{marginTop:18}}>
+                <button onClick={toggleSpeed}
+                  style={{display:"inline-flex", alignItems:"center", gap:7, padding:"8px 16px", borderRadius:20, border:"none", background:PL, color:PU, fontSize:14, fontWeight:700, cursor:"pointer"}}>
+                  ⏱ Моя скорость
+                  <span style={{fontSize:10, display:"inline-block", transform: showSpeed ? "rotate(180deg)" : "none", transition:"transform 0.2s"}}>▼</span>
+                </button>
+                {showSpeed && (
+                  <div style={{display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:8, marginTop:14, animation:"rankPop 0.35s ease-out"}}>
+                    {speed.map(r => (
+                      <div key={r.label} style={{background:"#F9FAFB", border:"1.5px solid #E5E7EB", borderRadius:14, padding:"11px 4px"}}>
+                        <div style={{fontSize:20, marginBottom:3}}>{r.emoji}</div>
+                        <div style={{fontSize:16, fontWeight:800, color:"#1F2937"}}>{r.value}</div>
+                        <div style={{fontSize:10.5, color:"#6B7280", marginTop:2}}>{r.label}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </div>
 
         {resultData && (() => {
