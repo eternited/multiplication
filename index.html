@@ -1393,6 +1393,10 @@ const db = window._db;
 const ADMIN_NAME = window._ADMIN_NAME;
 const ADMIN_RECOVERY_MAX_AGE_MS = 60 * 60 * 1000; // 1 час
 
+// Видимый номер версии приложения. Обновлять при КАЖДОМ пуше, меняющем
+// index.html/sw.js (формат ГГГГ-ММ-ДД.N — дата выкладки и номер за день).
+const APP_VERSION = "2026-07-13.1";
+
 const SES_OPTS = window.GAME.SES_OPTS;
 const NUMS = window.GAME.NUMS;
 const PU = "#534AB7", PL = "#EEEDFE", GR = "#16A34A", RD = "#DC2626";
@@ -2054,6 +2058,7 @@ function AuthScreen() {
       </button>
 
       <OfflineBadge />
+      <VersionTag />
     </div>
   );
 }
@@ -2082,6 +2087,10 @@ function Header({ name, badge, onLogout, onSettings }) {
 // ─── OFFLINE BADGE ───────────────────────────────────────
 // Готовность офлайн-режима: проверяем ФАКТИЧЕСКОЕ содержимое кэшей (критический shell
 // и счётчик озвучки), а не факт установки SW. Пока кэш греется — поллим раз в 3с.
+function VersionTag() {
+  return <div style={{fontSize:10.5, color:"#C2C5CC", textAlign:"center", marginTop:8}}>Версия {APP_VERSION}</div>;
+}
+
 function OfflineBadge() {
   const [st, setSt] = useState(null); // { shell: bool, audio: number }
   useEffect(() => {
@@ -2519,6 +2528,7 @@ function ChildApp({ user, profile, onLogout }) {
               style={{width:"100%", height:48, borderRadius:12, background:PU, color:"#fff", fontSize:16, fontWeight:700, border:"none", cursor:"pointer"}}>
               Закрыть
             </button>
+            <VersionTag />
           </div>
         </div>
       )}
@@ -3270,7 +3280,10 @@ function ParentApp({ user, profile, onLogout }) {
       <Header name={profile.name} badge="Родитель" onLogout={onLogout} />
 
       <div style={{...W, background:"#fff", border:"1.5px solid #E5E7EB", borderRadius:14, padding:"14px", marginBottom:16}}>
-        <div style={{fontSize:13, color:"#6B7280", marginBottom:8}}>Привязать ребёнка по коду</div>
+        <div style={{fontSize:14, fontWeight:600, color:"#374151", marginBottom:5}}>Привязать ребёнка по коду</div>
+        <div style={{fontSize:12, color:"#9CA3AF", lineHeight:1.5, marginBottom:10}}>
+          Где взять код: в приложении на телефоне ребёнка нажми значок ⚙️ справа вверху главного экрана — откроется окно «Код для родителя» с шестью цифрами.
+        </div>
         <input value={code} onChange={e => setCode(e.target.value.replace(/\D/g,"").slice(0,6))}
           placeholder="6 цифр" inputMode="numeric"
           style={{width:"100%", boxSizing:"border-box", padding:"12px 14px", borderRadius:12, border:"1.5px solid #D1D5DB", fontSize:18, outline:"none", background:"#fff", letterSpacing:4, textAlign:"center", marginBottom:10}} />
@@ -3334,6 +3347,7 @@ function ParentApp({ user, profile, onLogout }) {
           </div>
         </div>
       )}
+      <VersionTag />
     </div>
   );
 }
